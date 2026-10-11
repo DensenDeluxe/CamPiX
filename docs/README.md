@@ -13,6 +13,7 @@ CamPiX is an authenticated camera-control, recording, and streaming application 
 | [Repository analysis](REPOSITORY-ANALYSIS.md)  | Upstream branches, commit history, provenance, and migration lessons.               |
 | [Research report](deep-research-report.md)     | Ecosystem comparison and long-term target architecture, not a release feature list. |
 | [Contributing](../CONTRIBUTING.md)             | Development setup, verification, and English documentation/source-note conventions. |
+| [Engineering standard](ENGINEERING.md)         | Shared implementation, review, verification, and release requirements.              |
 | [Graphics and branding](../pictures/README.md) | Supplied banners, logos, badges, and design iterations.                             |
 
 Documentation and source comments are maintained in English. Interface localization is a separate feature; the optional German UI translation is retained.

@@ -44,6 +44,8 @@ The [CI workflow](.github/workflows/ci.yml) also builds a native package and Doc
 
 ## Change scope
 
+Follow the [engineering standard](docs/ENGINEERING.md) for implementation, review, and release gates. Repository instructions are maintained in [AGENTS.md](AGENTS.md) and imported by [CLAUDE.md](CLAUDE.md); changes to either entry point must remain consistent and pass documentation/import validation.
+
 Keep capture, motion, recording, and media transport independent from HTTP request handling. Preserve bounded queues, real failure states, authentication, and restart behavior. Add regression tests for changes to those boundaries.
 
 CamPiX currently has no published contribution or private security-reporting channel in this local workspace. Coordinate repository access and sensitive reports with the maintainer; see the [security model](docs/SECURITY.md).

@@ -53,6 +53,8 @@ function headingAnchors(source) {
 const files = [
   path.join(root, "README.md"),
   path.join(root, "CONTRIBUTING.md"),
+  path.join(root, "AGENTS.md"),
+  path.join(root, "CLAUDE.md"),
   ...(await markdownFiles(path.join(root, "docs"))),
   ...(await markdownFiles(path.join(root, "pictures"))),
 ];
@@ -66,6 +68,26 @@ for (const file of files) {
     errors.push(
       `${label}: contains an unavailable sandbox or citation reference`,
     );
+
+  // Instruction imports are paths relative to their declaring file.
+  if (path.basename(file) === "CLAUDE.md") {
+    for (const match of source.matchAll(/^@([^\s]+)\s*$/gm)) {
+      const target = path.resolve(path.dirname(file), match[1]);
+      const location = path.relative(root, target);
+      if (location.startsWith("..") || path.isAbsolute(location)) {
+        errors.push(
+          `${label}: instruction import escapes repository: ${match[1]}`,
+        );
+        continue;
+      }
+      try {
+        await readFile(target, "utf8");
+        links += 1;
+      } catch {
+        errors.push(`${label}: missing instruction import: ${match[1]}`);
+      }
+    }
+  }
 
   // Match targets, including image links nested inside another Markdown link.
   for (const match of outsideFences(source).matchAll(

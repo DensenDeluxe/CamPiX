@@ -7,8 +7,8 @@
     "test": "playwright test",
     "check": "node --check dist/app.js",
     "check:docs": "node scripts/check-docs.mjs",
-    "format": "prettier --write dist/index.html dist/styles.css dist/app.js playwright.config.mjs tests/browser/workflows.spec.mjs scripts/check-docs.mjs README.md CONTRIBUTING.md \"docs/**/*.md\" pictures/README.md",
-    "format:check": "prettier --check dist/index.html dist/styles.css dist/app.js playwright.config.mjs tests/browser/workflows.spec.mjs scripts/check-docs.mjs README.md CONTRIBUTING.md \"docs/**/*.md\" pictures/README.md"
+    "format": "prettier --write dist/index.html dist/styles.css dist/app.js playwright.config.mjs tests/browser/workflows.spec.mjs scripts/check-docs.mjs README.md CONTRIBUTING.md AGENTS.md CLAUDE.md .claude/settings.json \"docs/**/*.md\" pictures/README.md",
+    "format:check": "prettier --check dist/index.html dist/styles.css dist/app.js playwright.config.mjs tests/browser/workflows.spec.mjs scripts/check-docs.mjs README.md CONTRIBUTING.md AGENTS.md CLAUDE.md .claude/settings.json \"docs/**/*.md\" pictures/README.md"
   },
   "devDependencies": {
     "@playwright/test": "1.64.0",
