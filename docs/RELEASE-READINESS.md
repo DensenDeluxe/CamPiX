@@ -36,7 +36,7 @@ Recorded on Windows/Python 3.11: **29 API/recovery/FFmpeg/MediaMTX tests passed*
 
 The `pip-audit` check of fully pinned `requirements.lock` reported **no known vulnerabilities at the time of the audit**. Unknown vulnerabilities remain possible. Python linting and JavaScript syntax checks passed.
 
-An amd64 Debian package was built in Ubuntu 24.04/WSL with **Python 3.12**. This is not Raspberry Pi arm64 certification. The Linux suite recorded **23 passes and 6 explicit FFmpeg/MediaMTX skips** because those tools were absent. Package smoke checks cover bundled web assets, authentication, and JPEG capture. Docker/OCI builds, deployed systemd/Nginx operation, and physical hardware remain unqualified on this Windows host. CI is prepared with pinned actions and a digest-pinned default OCI base image; the remote workflow was not triggered here.
+An amd64 Debian package was built in Ubuntu 24.04/WSL with **Python 3.12**. This is not Raspberry Pi arm64 certification. The Linux suite recorded **23 passes and 6 explicit FFmpeg/MediaMTX skips** because those tools were absent. Package smoke checks cover bundled web assets, authentication, and JPEG capture. Docker/OCI builds, deployed systemd/Nginx operation, and physical hardware remain unqualified on this Windows host. CI uses pinned actions and a digest-pinned default OCI base image. Remote verification is tracked in [GitHub Actions](https://github.com/DensenDeluxe/CamPiX/actions); assess the run for the exact commit rather than treating this local evidence as a remote result.
 
 ## Remaining production gates
 

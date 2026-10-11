@@ -2,6 +2,8 @@
 
 ![CamPiX — open-source camera web interface](pictures/campix-github-banner-1600x520.png)
 
+_One Interface. Every Pi. More Cameras._
+
 **Camera control, recording, and streaming for Raspberry Pi and Linux.**
 
 CamPiX brings live view, camera controls, snapshots, video recording, motion detection, schedules, and a persistent media library into one authenticated web interface. Its `campixd` service discovers camera capabilities instead of assuming compatibility from a board or sensor name.
