@@ -30,7 +30,6 @@ The familiar camera-appliance workflow should not depend on an obsolete camera s
 - **Authenticated control plane:** FastAPI, REST/OpenAPI, WebSocket events, SQLite, system metrics, Argon2id passwords, viewer/operator/admin roles, CSRF protection, and revocable sessions.
 - **Optional media server:** supervised, version-pinned MediaMTX for RTSP publishing and authenticated WebRTC/HLS access, with MJPEG fallback.
 - **Web interface:** responsive desktop and mobile layouts, dark/light themes, English/German localization, and the supplied CamPiX branding. No frontend build or external CDN is required.
-  
 
 Actual application screenshot from the Chromium workflow tests, using explicit synthetic input on Windows and the English interface. This demonstrates the UI, not physical-camera qualification.
 
