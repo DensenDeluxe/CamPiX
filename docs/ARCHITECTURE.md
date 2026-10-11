@@ -1,0 +1,54 @@
+# CamPiX: implemented architecture
+
+[Documentation index](README.md) · [Deployment](DEPLOYMENT.md) · [Release readiness](RELEASE-READINESS.md)
+
+This document describes the implemented 0.2.0 service. The [research report](deep-research-report.md) describes a broader target architecture; it must not be read as a statement that every proposed component exists.
+
+```text
+Browser — REST / WebSocket / MJPEG / WHEP / HLS
+   │ Session + CSRF + roles
+   ▼
+campixd (one process per data directory)
+   ├── FastAPI: versioned API, static interface, authenticated media proxy
+   ├── SQLite/WAL: users, sessions, cameras, schedules, media, events, export jobs
+   ├── Per camera: capture thread → JPEG / bounded pre-roll / small analysis frames
+   │    ├── Picamera2: distribution libcamera and dynamic sensor controls
+   │    ├── V4L2: OpenCV capture and v4l2-ctl controls
+   │    ├── Network: isolated FFmpeg decoder, RTSP/HTTP(S)
+   │    └── Legacy: existing local JPEG preview (not an MMAL/FIFO driver)
+   ├── Per camera: motion worker → event → recording / renewed post-roll
+   ├── Per recording: bounded JPEG queue → FFmpeg → atomically finalized MP4
+   ├── Scheduler: persistent claim-before-execute rules, no backlog replay
+   ├── Export worker: bounded queue, timelapse, explicit job status
+   └── Optional: MediaMTX supervisor → RTSP publisher → WebRTC/HLS
+```
+
+## Worker and encoding boundaries
+
+Capture, motion analysis, and recording run outside HTTP request handling. A failed camera is reopened with bounded retry backoff. Recorders and publishers have independent FFmpeg processes; a slow encoder does not block the capture thread. The recorder drops and reports excess frames instead of consuming unbounded memory. Pre-roll and recording queues are each limited to 32 MiB per camera.
+
+The current portable pipeline decodes frames and re-encodes them. `auto` means **libx264 software encoding**, not automatic native hardware acceleration. `h264_v4l2m2m` can be selected explicitly but remains unverified without hardware-in-the-loop evidence. Direct Picamera2 H.264, compressed UVC passthrough, DMABUF/zero-copy, and a shared live-view/recording encoder are not implemented. This matters particularly on smaller Raspberry Pis.
+
+## Capabilities, not assumed compatibility
+
+A camera becomes `online` only after producing a real frame. Controls are exposed only when detected by the adapter. Missing cameras, missing encoders, and MediaMTX failures produce visible errors. The API reports measured FPS, frame age, and dropped recording frames. An installed encoder name is not proof of tested acceleration; `hardware_verified` remains `false` without qualification.
+
+Synthetic capture is permitted only in explicit demo mode. Previously saved synthetic profiles are disabled outside that mode. A demo test never awards a physical board a tested status.
+
+## Storage and restart behavior
+
+JPEG/MP4 files are written to private temporary paths and enter the media index only after successful finalization. Deletion first renames a file as a journal step; a database failure restores it. Startup removes missing indexed entries while retaining interrupted or unindexed files. Automatic MP4 repair after power loss is not claimed.
+
+SQLite access is protected by transactions and thread synchronization. Schema 1 migrates to schema 2; unknown newer schemas are rejected rather than downgraded. An operating-system lock prevents two active services from using the same data directory. Database backups exclude active sessions. Media files must be backed up separately.
+
+## Media plane and trust boundary
+
+Optional managed MediaMTX is pinned to v1.21.2 and binds API, RTSP, HLS, WebRTC, and ICE to loopback only. RTMP, SRT, and MoQ are disabled. CamPiX proxies authenticated reads; publishing stays internal. A private HLS CDN secret prevents browser media access from bypassing CamPiX authentication. Secrets and network-camera URLs are excluded from configuration exports.
+
+LAN/WAN WebRTC requires an external, secured MediaMTX installation with reachable ICE/TURN addresses. The managed loopback server alone is not a WAN configuration. The frontend currently plays HLS only when the browser supports it natively; other browsers fall back to MJPEG.
+
+## Deliberate differences from the research report
+
+The report proposes a long-term universal successor. Version 0.2.0 uses Python/FastAPI instead of Rust/Go and buildless JavaScript instead of TypeScript, Web Components, and a PWA. This shortens the Picamera2 integration path; it does not fulfill those specific language and frontend recommendations.
+
+AI/Hailo/IMX500, vendor GStreamer, ONVIF, complete historical macros/FIFOs, modern external event hooks, and native zero-copy pipelines are not hidden behind simulated success indicators. They are explicitly listed as outstanding in [RELEASE-READINESS.md](RELEASE-READINESS.md).

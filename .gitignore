@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+build/
+packages/
+.campix/
+.env
+*.sqlite3*
+*.partial
+node_modules/
+test-results/
+playwright-report/

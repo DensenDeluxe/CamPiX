@@ -1,0 +1,17 @@
+{
+  "name": "campix-web-tests",
+  "version": "0.2.0",
+  "description": "Browser verification for the CamPiX camera-control web interface",
+  "private": true,
+  "scripts": {
+    "test": "playwright test",
+    "check": "node --check dist/app.js",
+    "check:docs": "node scripts/check-docs.mjs",
+    "format": "prettier --write dist/index.html dist/styles.css dist/app.js playwright.config.mjs tests/browser/workflows.spec.mjs scripts/check-docs.mjs README.md CONTRIBUTING.md \"docs/**/*.md\" pictures/README.md",
+    "format:check": "prettier --check dist/index.html dist/styles.css dist/app.js playwright.config.mjs tests/browser/workflows.spec.mjs scripts/check-docs.mjs README.md CONTRIBUTING.md \"docs/**/*.md\" pictures/README.md"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.64.0",
+    "prettier": "3.9.10"
+  }
+}

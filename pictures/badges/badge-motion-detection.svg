@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="299" height="34" viewBox="0 0 299 34"><defs>
+<linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#050D1B"/><stop offset=".55" stop-color="#0B1933"/><stop offset="1" stop-color="#1D1035"/></linearGradient>
+<linearGradient id="line" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#07DFF1"/><stop offset=".55" stop-color="#9B5CFF"/><stop offset="1" stop-color="#FB178F"/></linearGradient>
+<linearGradient id="glass" x1="0" y1="0" x2=".8" y2="1"><stop stop-color="#1EDFF8"/><stop offset=".25" stop-color="#0866BC"/><stop offset=".62" stop-color="#29166A"/><stop offset="1" stop-color="#FB178F"/></linearGradient>
+<linearGradient id="green" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#2AE8CC"/><stop offset="1" stop-color="#087762"/></linearGradient>
+<radialGradient id="aura"><stop stop-color="#07DFF1" stop-opacity=".32"/><stop offset="1" stop-color="#07DFF1" stop-opacity="0"/></radialGradient>
+<radialGradient id="pink"><stop stop-color="#FB178F" stop-opacity=".2"/><stop offset="1" stop-color="#FB178F" stop-opacity="0"/></radialGradient>
+<filter id="glow" x="-40%" y="-40%" width="180%" height="180%"><feGaussianBlur stdDeviation="9"/></filter>
+</defs><rect width="299" height="34" rx="7" fill="#0C1526"/><path d="M176 0H292Q299 0 299 7V27Q299 34 292 34H176Z" fill="#FB178F"/>
+    <text x="88.0" y="22.5" text-anchor="middle" font-family="DejaVu Sans,sans-serif" font-size="14" font-weight="bold" fill="#EAF3FB">Motion Detection</text>
+    <text x="237.5" y="22.5" text-anchor="middle" font-family="DejaVu Sans,sans-serif" font-size="14" font-weight="bold" fill="#061322">Supported</text></svg>

@@ -1,0 +1,25 @@
+services:
+  campix:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      CAMPIX_PUBLIC_ORIGIN: ${CAMPIX_PUBLIC_ORIGIN:-http://localhost:8080}
+      CAMPIX_SECURE_COOKIES: ${CAMPIX_SECURE_COOKIES:-false}
+      CAMPIX_TRUST_PROXY: ${CAMPIX_TRUST_PROXY:-false}
+      CAMPIX_DEMO: "false"
+    volumes:
+      - campix-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=128m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    stop_grace_period: 90s
+    # USB/V4L2: add explicit devices and the host's video group ID here.
+    # Do not use --privileged. CSI/Picamera2 uses the native package instead.
+volumes:
+  campix-data:

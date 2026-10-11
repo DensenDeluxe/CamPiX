@@ -1,0 +1,10 @@
+.venv
+node_modules
+test-results
+.pytest_cache
+.campix
+packages
+build
+**/__pycache__
+**/*.sqlite3*
+.git

@@ -1,0 +1,747 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#071321" />
+    <meta
+      name="description"
+      content="CamPiX camera control for Raspberry Pi and Linux"
+    />
+    <title>CamPiX · Camera control</title>
+    <link rel="icon" href="./assets/campix-icon.svg" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <section id="login-screen" class="login-screen">
+      <form id="login-form" class="panel login-card">
+        <img
+          src="./assets/campix-wordmark.svg"
+          alt="CamPiX"
+          class="login-brand"
+        />
+        <p class="eyebrow">CAMERA WORKSPACE</p>
+        <h1 data-i18n="signin">Anmelden</h1>
+        <label
+          ><span data-i18n="username">Benutzername</span
+          ><input
+            name="username"
+            autocomplete="username"
+            required
+            maxlength="64"
+        /></label>
+        <label
+          ><span data-i18n="password">Passwort</span
+          ><input
+            name="password"
+            type="password"
+            autocomplete="current-password"
+            required
+            maxlength="128"
+        /></label>
+        <p id="login-error" class="form-error" role="alert"></p>
+        <button class="button primary full-button" data-i18n="signin">
+          Anmelden
+        </button>
+        <p class="login-note" data-i18n="accountHint">
+          Das erste Administratorkonto wird beim Einrichten des Dienstes
+          angelegt.
+        </p>
+      </form>
+    </section>
+    <div class="app-frame" id="workspace" hidden>
+      <aside class="sidebar" id="sidebar">
+        <div class="brand-lockup">
+          <img
+            src="./assets/campix-wordmark.svg"
+            alt="CamPiX"
+            class="brand-wordmark"
+          /><span class="brand-version"
+            >CAMERA CONTROL <b id="version-label">0.2.0</b></span
+          >
+        </div>
+        <div class="connection-card">
+          <span class="status-dot"></span>
+          <div>
+            <strong id="connection-label">CamPiX</strong
+            ><small id="connection-detail">…</small>
+          </div>
+        </div>
+        <nav class="primary-nav" aria-label="Navigation">
+          <p class="nav-label">WORKSPACE</p>
+          <button class="nav-item active" data-view="overview">
+            <span class="nav-icon">⌂</span
+            ><span data-i18n="overview">Übersicht</span>
+          </button>
+          <button class="nav-item" data-view="media">
+            <span class="nav-icon">▧</span><span data-i18n="media">Medien</span
+            ><em id="nav-media-count">0</em>
+          </button>
+          <button class="nav-item" data-view="scheduler">
+            <span class="nav-icon">◷</span
+            ><span data-i18n="scheduler">Zeitpläne</span>
+          </button>
+          <button class="nav-item" data-view="devices">
+            <span class="nav-icon">⌁</span
+            ><span data-i18n="devices">Kameras</span>
+          </button>
+          <p class="nav-label secondary-label">SYSTEM</p>
+          <button class="nav-item" data-view="settings">
+            <span class="nav-icon">⚙</span
+            ><span data-i18n="settings">Einstellungen</span>
+          </button>
+        </nav>
+        <div class="sidebar-footer">
+          <div class="mini-device">
+            <img src="./assets/campix-icon.svg" alt="" />
+            <div>
+              <strong id="user-label"></strong><small id="role-label"></small>
+            </div>
+          </div>
+          <div class="footer-links">
+            <button id="language-button" aria-label="Language">EN</button
+            ><button id="theme-toggle" aria-label="Theme">◐</button
+            ><button id="logout-button" data-i18n="logout">Abmelden</button>
+          </div>
+        </div>
+      </aside>
+      <main class="main-shell">
+        <header class="topbar">
+          <button class="mobile-menu" id="mobile-menu" aria-label="Navigation">
+            ☰
+          </button>
+          <div class="breadcrumbs">
+            <span>CamPiX</span><b>/</b
+            ><strong id="breadcrumb-current">Übersicht</strong>
+          </div>
+          <div class="topbar-actions">
+            <span class="demo-pill" id="mode-label"></span
+            ><button
+              class="button ghost"
+              id="refresh-button"
+              data-i18n="refresh"
+            >
+              Aktualisieren
+            </button>
+          </div>
+        </header>
+        <div class="content-wrap">
+          <section class="view active" data-view-panel="overview">
+            <div class="page-intro">
+              <div>
+                <p class="eyebrow" id="current-date"></p>
+                <h1 data-i18n="controlCenter">Kamera-Kontrollzentrum</h1>
+                <p class="subhead" id="system-summary"></p>
+              </div>
+              <button
+                class="button primary"
+                data-add-camera
+                data-admin
+                data-i18n="addCamera"
+              >
+                ＋ Kamera hinzufügen
+              </button>
+            </div>
+            <div class="metric-grid">
+              <article class="metric-card">
+                <div class="metric-icon cyan">◉</div>
+                <div>
+                  <small data-i18n="onlineCameras">KAMERAS ONLINE</small
+                  ><strong id="camera-count"></strong>
+                </div>
+              </article>
+              <article class="metric-card">
+                <div class="metric-icon violet">▣</div>
+                <div>
+                  <small data-i18n="freeStorage">SPEICHER FREI</small
+                  ><strong id="storage-free"></strong>
+                </div>
+              </article>
+              <article class="metric-card">
+                <div class="metric-icon pink">⌁</div>
+                <div>
+                  <small data-i18n="cpuLoad">CPU-LAST</small
+                  ><strong id="cpu-load"></strong>
+                </div>
+              </article>
+              <article class="metric-card">
+                <div class="metric-icon green">◷</div>
+                <div>
+                  <small data-i18n="uptime">DIENSTLAUFZEIT</small
+                  ><strong id="uptime"></strong>
+                </div>
+              </article>
+            </div>
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">LIVE</p>
+                <h2 id="active-camera-name"></h2>
+              </div>
+              <div class="live-meta">
+                <span id="camera-state"></span><span class="divider"></span
+                ><span id="clock"></span>
+              </div>
+            </div>
+            <div class="live-layout">
+              <article class="panel live-panel">
+                <div class="panel-header">
+                  <label class="camera-picker"
+                    ><span data-i18n="camera">Kamera</span
+                    ><select id="camera-select" aria-label="Camera"></select
+                  ></label>
+                  <div class="panel-header-actions">
+                    <select id="transport-select" aria-label="Transport">
+                      <option value="auto">WebRTC → MJPEG</option>
+                      <option value="mjpeg">MJPEG</option>
+                      <option value="hls">HLS</option></select
+                    ><button
+                      class="round-control"
+                      id="fullscreen-button"
+                      aria-label="Fullscreen"
+                    >
+                      ↗
+                    </button>
+                  </div>
+                </div>
+                <div class="live-stage" id="live-stage">
+                  <img id="live-image" alt="Live camera" hidden /><video
+                    id="live-video"
+                    autoplay
+                    muted
+                    playsinline
+                    hidden
+                  ></video>
+                  <div class="empty-state" id="live-empty">
+                    <img src="./assets/campix-icon.svg" alt="" />
+                    <p data-i18n="noCamera">
+                      Füge eine Kamera hinzu, um das Livebild zu starten.
+                    </p>
+                  </div>
+                  <span
+                    class="live-badge stage-live-badge"
+                    id="live-badge"
+                    hidden
+                    >LIVE</span
+                  >
+                </div>
+                <div class="live-toolbar">
+                  <div class="toolbar-stats">
+                    <span id="actual-fps"></span
+                    ><span id="actual-resolution"></span
+                    ><span id="actual-transport"></span>
+                  </div>
+                  <div class="toolbar-actions">
+                    <button
+                      class="button ghost"
+                      data-capture
+                      data-operator
+                      data-i18n="capture"
+                    >
+                      ◎ Foto</button
+                    ><button
+                      class="button record-button"
+                      id="record-button"
+                      data-operator
+                    >
+                      <span class="record-dot"></span
+                      ><span id="record-label">Aufnehmen</span>
+                    </button>
+                  </div>
+                </div>
+              </article>
+              <aside class="panel camera-panel">
+                <div class="panel-header compact">
+                  <div>
+                    <p class="eyebrow">CAMERA</p>
+                    <h3 data-i18n="controls">Kamerasteuerung</h3>
+                  </div>
+                </div>
+                <div class="backend-banner">
+                  <div class="backend-mark">⌁</div>
+                  <div>
+                    <strong id="backend-label"></strong
+                    ><small id="sensor-label"></small>
+                  </div>
+                </div>
+                <div class="control-section" data-control="exposure">
+                  <div class="control-heading">
+                    <span data-i18n="exposure">Belichtung</span
+                    ><output id="exposure-output"></output>
+                  </div>
+                  <input
+                    class="range cyan-range"
+                    id="exposure-range"
+                    type="range"
+                    min="-8"
+                    max="8"
+                    step=".1"
+                    value="0"
+                    aria-label="Exposure"
+                  />
+                </div>
+                <div class="control-section" data-control="brightness">
+                  <div class="control-heading">
+                    <span data-i18n="brightness">Helligkeit</span
+                    ><output id="brightness-output"></output>
+                  </div>
+                  <input
+                    class="range violet-range"
+                    id="brightness-range"
+                    type="range"
+                    min="-1"
+                    max="1"
+                    step=".05"
+                    value="0"
+                    aria-label="Brightness"
+                  />
+                </div>
+                <div class="control-section" data-control="lens_position">
+                  <div class="control-heading">
+                    <span data-i18n="focus">Linsenposition</span
+                    ><output id="focus-output"></output>
+                  </div>
+                  <input
+                    class="range pink-range"
+                    id="focus-range"
+                    type="range"
+                    min="0"
+                    max="32"
+                    step=".1"
+                    value="0"
+                    aria-label="Lens position"
+                  />
+                </div>
+                <label class="control-row" data-control="autofocus"
+                  ><span>Autofocus</span
+                  ><input type="checkbox" id="autofocus-checkbox"
+                /></label>
+                <p
+                  class="control-note"
+                  id="controls-empty"
+                  hidden
+                  data-i18n="noControls"
+                >
+                  Diese Quelle bietet keine Sensor-Controls.
+                </p>
+                <div class="control-row">
+                  <span data-i18n="motion">Bewegungserkennung</span
+                  ><span id="motion-state"></span>
+                </div>
+                <button
+                  class="button soft full-button inset-button"
+                  id="apply-controls"
+                  data-operator
+                  data-i18n="apply"
+                >
+                  ✓ Anwenden
+                </button>
+              </aside>
+            </div>
+            <div class="lower-grid">
+              <article class="panel recent-panel">
+                <div class="panel-header">
+                  <h3 data-i18n="recentMedia">Letzte Aufnahmen</h3>
+                  <button
+                    class="text-button"
+                    data-view-target="media"
+                    data-i18n="showAll"
+                  >
+                    Alle anzeigen →
+                  </button>
+                </div>
+                <div id="recent-media" class="media-strip"></div>
+              </article>
+              <article class="panel events-panel">
+                <div class="panel-header">
+                  <h3 data-i18n="activity">Aktivität</h3>
+                  <span class="event-time" id="event-connection"></span>
+                </div>
+                <div class="event-list" id="recent-events"></div>
+              </article>
+            </div>
+          </section>
+          <section class="view" data-view-panel="media">
+            <div class="page-intro">
+              <div>
+                <p class="eyebrow">MEDIA LIBRARY</p>
+                <h1 data-i18n="media">Medien</h1>
+                <p class="subhead" data-i18n="mediaHint">
+                  Gespeicherte Fotos und abgeschlossene Aufnahmen.
+                </p>
+              </div>
+              <div class="intro-actions">
+                <button
+                  class="button ghost"
+                  id="timelapse-button"
+                  data-operator
+                >
+                  Timelapse → MP4</button
+                ><button
+                  class="button primary"
+                  data-capture
+                  data-operator
+                  data-i18n="capture"
+                >
+                  ◎ Foto
+                </button>
+              </div>
+            </div>
+            <div class="media-toolbar panel">
+              <div class="filter-tabs" id="media-filters">
+                <button class="active" data-kind="" data-i18n="all">Alle</button
+                ><button data-kind="snapshot" data-i18n="photos">Fotos</button
+                ><button data-kind="video" data-i18n="videos">Videos</button>
+              </div>
+              <div class="search-box">
+                <input
+                  id="media-search"
+                  placeholder="Medien suchen"
+                  aria-label="Search media"
+                />
+              </div>
+            </div>
+            <div class="media-grid" id="media-grid"></div>
+            <div class="pagination">
+              <button class="button ghost" id="media-prev">←</button
+              ><span id="media-page"></span
+              ><button class="button ghost" id="media-next">→</button>
+            </div>
+          </section>
+          <section class="view" data-view-panel="scheduler">
+            <div class="page-intro">
+              <div>
+                <p class="eyebrow">AUTOMATION</p>
+                <h1 data-i18n="scheduler">Zeitpläne</h1>
+                <p class="subhead" data-i18n="scheduleHint">
+                  Fotos und zeitbegrenzte Aufnahmen mit gespeicherten Regeln.
+                </p>
+              </div>
+              <button
+                class="button primary"
+                id="new-schedule"
+                data-admin
+                data-i18n="newSchedule"
+              >
+                ＋ Neuer Zeitplan
+              </button>
+            </div>
+            <div id="schedule-list" class="schedule-cards"></div>
+          </section>
+          <section class="view" data-view-panel="devices">
+            <div class="page-intro">
+              <div>
+                <p class="eyebrow">CAPABILITIES</p>
+                <h1 data-i18n="devices">Kameras</h1>
+                <p class="subhead" data-i18n="devicesHint">
+                  Erkannte Fähigkeiten und tatsächlicher Verbindungsstatus.
+                </p>
+              </div>
+              <div class="intro-actions">
+                <button
+                  class="button ghost"
+                  id="scan-button"
+                  data-admin
+                  data-i18n="scan"
+                >
+                  Geräte suchen</button
+                ><button
+                  class="button primary"
+                  data-add-camera
+                  data-admin
+                  data-i18n="addCamera"
+                >
+                  ＋ Kamera hinzufügen
+                </button>
+              </div>
+            </div>
+            <div id="discovery-list" class="discovery-list" hidden></div>
+            <div id="device-list" class="device-list"></div>
+          </section>
+          <section class="view" data-view-panel="settings">
+            <div class="page-intro">
+              <div>
+                <p class="eyebrow">CONFIGURATION</p>
+                <h1 data-i18n="settings">Einstellungen</h1>
+                <p class="subhead" data-i18n="settingsHint">
+                  Kameraprofile, Speicher und Zugriffsrechte.
+                </p>
+              </div>
+              <button
+                class="button ghost"
+                id="export-button"
+                data-admin
+                data-i18n="export"
+              >
+                Konfiguration exportieren
+              </button>
+            </div>
+            <p
+              id="settings-forbidden"
+              class="empty-message"
+              hidden
+              data-i18n="adminRequired"
+            >
+              Administratorrechte erforderlich.
+            </p>
+            <div id="admin-settings" data-admin>
+              <form class="panel settings-form" id="camera-settings-form">
+                <div class="panel-header">
+                  <h3 data-i18n="cameraProfile">Aktives Kameraprofil</h3>
+                  <button class="button primary" data-i18n="save">
+                    Speichern
+                  </button>
+                </div>
+                <div class="form-grid">
+                  <label
+                    ><span data-i18n="name">Name</span
+                    ><input
+                      id="setting-camera-name"
+                      required
+                      maxlength="80" /></label
+                  ><label
+                    ><span data-i18n="resolution">Auflösung</span
+                    ><select id="setting-resolution">
+                      <option value="640x360">640 × 360</option>
+                      <option value="640x480">640 × 480</option>
+                      <option value="1280x720">1280 × 720</option>
+                      <option value="1920x1080">1920 × 1080</option>
+                      <option value="3840x2160">3840 × 2160</option>
+                    </select></label
+                  ><label
+                    >FPS<input
+                      id="setting-fps"
+                      type="number"
+                      min="1"
+                      max="60"
+                      required
+                      value="10" /></label
+                  ><label
+                    >Pre-roll (s)<input
+                      id="setting-preroll"
+                      type="number"
+                      min="0"
+                      max="10"
+                      required
+                      value="3" /></label
+                  ><label
+                    >Motion threshold (0–1)<input
+                      id="setting-motion-threshold"
+                      type="number"
+                      min=".005"
+                      max=".9"
+                      step=".005"
+                      required
+                      value=".08" /></label
+                  ><label class="checkbox-label"
+                    ><input id="setting-motion" type="checkbox" /><span
+                      data-i18n="motion"
+                      >Bewegungserkennung</span
+                    ></label
+                  >
+                </div>
+              </form>
+              <form class="panel settings-form" id="storage-settings-form">
+                <div class="panel-header">
+                  <h3 data-i18n="storage">Speicher</h3>
+                  <button class="button primary" data-i18n="save">
+                    Speichern
+                  </button>
+                </div>
+                <div class="form-grid">
+                  <label
+                    ><span data-i18n="retention">Aufbewahrung (Tage)</span
+                    ><input
+                      id="setting-retention"
+                      type="number"
+                      min="1"
+                      max="3650"
+                      required /></label
+                  ><label
+                    ><span data-i18n="reserve">Freier Mindestplatz (MB)</span
+                    ><input
+                      id="setting-reserve"
+                      type="number"
+                      min="32"
+                      required
+                  /></label>
+                </div>
+                <p class="control-note" data-i18n="retentionHint">
+                  Stündliche Bereinigung entfernt abgelaufene, ungesperrte
+                  Medien. Gesperrte Medien bleiben erhalten.
+                </p>
+              </form>
+              <article class="panel users-panel">
+                <div class="panel-header">
+                  <h3 data-i18n="users">Benutzer</h3>
+                  <button class="button soft" id="new-user" data-i18n="newUser">
+                    ＋ Benutzer
+                  </button>
+                </div>
+                <div id="users-list"></div>
+              </article>
+              <article class="panel system-panel">
+                <div class="panel-header"><h3>System</h3></div>
+                <dl id="system-details"></dl>
+              </article>
+            </div>
+          </section>
+        </div>
+      </main>
+    </div>
+    <dialog id="camera-dialog" class="panel app-dialog">
+      <form id="camera-form">
+        <div class="panel-header">
+          <h3 data-i18n="addCamera">Kamera hinzufügen</h3>
+          <button class="round-control" type="button" data-close>×</button>
+        </div>
+        <div class="dialog-fields">
+          <label
+            ><span data-i18n="name">Name</span
+            ><input name="name" required maxlength="80" /></label
+          ><label
+            >Backend<select name="backend" id="new-camera-backend">
+              <option value="picamera2">Picamera2 / libcamera</option>
+              <option value="v4l2">V4L2 / USB</option>
+              <option value="network">RTSP / HTTP</option>
+              <option value="legacy">Legacy JPEG preview</option>
+              <option value="synthetic" id="synthetic-option">
+                Synthetic test camera
+              </option>
+            </select></label
+          ><label
+            ><span data-i18n="source">Quelle (Index, /dev/videoN oder URL)</span
+            ><input
+              name="source"
+              id="new-camera-source"
+              required
+              value="0"
+              maxlength="2048"
+          /></label>
+          <p class="control-note" data-i18n="cameraHint">
+            Treiber müssen auf dem Host installiert sein. Ein Gerät ist erst
+            nach erfolgreichem Öffnen online.
+          </p>
+          <button class="button primary full-button" data-i18n="add">
+            Hinzufügen
+          </button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="schedule-dialog" class="panel app-dialog">
+      <form id="schedule-form">
+        <div class="panel-header">
+          <h3 data-i18n="newSchedule">Neuer Zeitplan</h3>
+          <button class="round-control" type="button" data-close>×</button>
+        </div>
+        <div class="dialog-fields">
+          <label
+            ><span data-i18n="name">Name</span
+            ><input name="name" required maxlength="80" /></label
+          ><label
+            ><span data-i18n="camera">Kamera</span
+            ><select name="camera_id" id="schedule-camera"></select></label
+          ><label
+            ><span data-i18n="action">Aktion</span
+            ><select name="action">
+              <option value="snapshot">Foto / Timelapse frame</option>
+              <option value="record">Video</option>
+            </select></label
+          ><label
+            ><span data-i18n="interval">Intervall (Sekunden)</span
+            ><input
+              name="interval_seconds"
+              type="number"
+              min="5"
+              max="604800"
+              required
+              value="3600" /></label
+          ><label
+            ><span data-i18n="duration">Videodauer (Sekunden)</span
+            ><input
+              name="duration_seconds"
+              type="number"
+              min="1"
+              max="3600"
+              required
+              value="30"
+          /></label>
+          <div class="hour-fields">
+            <label
+              ><span data-i18n="startHour">Startstunde</span
+              ><input
+                name="start_hour"
+                type="number"
+                min="0"
+                max="23"
+                value="0"
+                required /></label
+            ><label
+              ><span data-i18n="endHour">Endstunde</span
+              ><input
+                name="end_hour"
+                type="number"
+                min="0"
+                max="24"
+                value="24"
+                required
+            /></label>
+          </div>
+          <label
+            ><span data-i18n="timezone">Zeitzone</span
+            ><input name="timezone" required value="Europe/Berlin" /></label
+          ><button class="button primary full-button" data-i18n="save">
+            Speichern
+          </button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="user-dialog" class="panel app-dialog">
+      <form id="user-form">
+        <div class="panel-header">
+          <h3 data-i18n="newUser">Benutzer anlegen</h3>
+          <button class="round-control" type="button" data-close>×</button>
+        </div>
+        <div class="dialog-fields">
+          <label
+            ><span data-i18n="username">Benutzername</span
+            ><input
+              name="username"
+              autocomplete="off"
+              required
+              pattern="[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}" /></label
+          ><label
+            ><span data-i18n="password">Passwort (12+)</span
+            ><input
+              name="password"
+              type="password"
+              autocomplete="new-password"
+              minlength="12"
+              maxlength="128"
+              required /></label
+          ><label
+            ><span data-i18n="role">Rolle</span
+            ><select name="role">
+              <option>viewer</option>
+              <option>operator</option>
+              <option>admin</option>
+            </select></label
+          ><button class="button primary full-button" data-i18n="add">
+            Hinzufügen
+          </button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="media-dialog" class="panel media-dialog">
+      <div class="panel-header">
+        <h3 id="media-dialog-title"></h3>
+        <button class="round-control" data-close>×</button>
+      </div>
+      <div id="media-viewer"></div>
+      <div class="media-dialog-actions" id="media-dialog-actions"></div>
+    </dialog>
+    <div class="toast" id="toast" role="status" aria-live="polite">
+      <span class="toast-mark">✓</span><span id="toast-message"></span>
+    </div>
+    <script src="./app.js"></script>
+  </body>
+</html>

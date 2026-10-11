@@ -1,0 +1,11 @@
+{
+  "data_dir": "/var/lib/campix",
+  "host": "127.0.0.1",
+  "port": 8080,
+  "demo": false,
+  "secure_cookies": false,
+  "trust_proxy": false,
+  "retention_days": 30,
+  "min_free_mb": 256,
+  "max_cameras": 8
+}

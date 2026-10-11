@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+if [ -d /run/systemd/system ] && { [ "$1" = remove ] || [ "$1" = upgrade ]; }; then
+    systemctl stop campix.service || true
+fi
+# Media, accounts and configuration are deliberately retained on package removal.

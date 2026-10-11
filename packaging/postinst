@@ -1,0 +1,12 @@
+#!/bin/sh
+set -eu
+if [ "$1" = configure ]; then
+    if ! getent passwd campix >/dev/null; then
+        adduser --system --group --home /var/lib/campix --no-create-home campix
+    fi
+    usermod -a -G video campix
+    if getent group render >/dev/null; then usermod -a -G render campix; fi
+    install -d -m 0700 -o campix -g campix /var/lib/campix
+    if [ -d /run/systemd/system ]; then systemctl daemon-reload; fi
+    printf '%s\n' 'CamPiX installed. Create an admin before enabling the service; see /usr/share/doc/campix/DEPLOYMENT.md.'
+fi
