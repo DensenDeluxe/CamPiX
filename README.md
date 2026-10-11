@@ -35,31 +35,39 @@ Actual application screenshot from the Chromium workflow tests, using explicit s
 
 ## Quick start
 
-Install Python 3.11 or newer, `uv`, and FFmpeg with `libx264` plus `ffprobe`. Run the following commands from the project directory.
+The all-in-one installer prepares the available platform profile, installs FFmpeg, the application, and verified MediaMTX by default, and guides you through creating the first administrator and registering discovered cameras. It uses the operating system's camera packages where available; unknown sensors and vendor drivers require their manufacturer's documented setup. No default password or synthetic camera is created.
 
-### Windows development or demo
+The remote entrypoints below become available when this installer revision is published to `main`. They have been added to this checkout; this documentation does not claim that they are already published.
 
-```powershell
-uv sync --locked --extra test --extra v4l2
-.venv\Scripts\campixd.exe init-admin
-.venv\Scripts\campixd.exe serve --demo
-```
-
-### Linux development or demo
+### Linux and macOS
 
 ```sh
-uv sync --locked --extra test --extra v4l2
-.venv/bin/campixd init-admin
-.venv/bin/campixd serve --demo
+curl -fsSL https://raw.githubusercontent.com/DensenDeluxe/CamPiX/main/install.sh | bash
 ```
 
-Open <http://127.0.0.1:8080> and sign in with the account you created. There is no default password. The bootstrap command prompts without echoing the password.
+### Windows PowerShell
 
-`--demo` explicitly enables synthetic input images; snapshots, encoded videos, and database records are still real. Omit `--demo` for normal operation, then add a camera through the administrator's **Cameras** view. Windows supports development, demos, and network sources; Picamera2 and V4L2 require Linux and the appropriate host drivers.
+```powershell
+& ([scriptblock]::Create((Invoke-RestMethod https://raw.githubusercontent.com/DensenDeluxe/CamPiX/main/install.ps1)))
+```
+
+Run the installer as your normal user, in an interactive terminal. It requests elevation for system-package operations. The entrypoint resolves the requested Git reference once and installs from a fresh detached checkout. `CAMPIX_REF` selects an explicit tag or commit for an application release; the default follows `main`.
+
+After successful setup and service startup, open <http://127.0.0.1:8080>. Raspberry Pi and Debian-family systems use a native package and systemd. Other supported profiles use a private installation and start at user login through a systemd user service, macOS LaunchAgent, or limited Windows scheduled task. Windows and macOS support network sources; local Picamera2 and V4L2 capture require Linux.
+
+For download-and-inspect commands, supported profiles, offline planning, backups, and recovery, see [installation and operations](docs/DEPLOYMENT.md). The installer can discover a board and devices, but physical-camera compatibility and performance still require validation on that host.
+
+### Test this checkout
+
+The Python installer accepts a read-only plan without bootstrap downloads or package changes:
+
+```sh
+python scripts/install.py --dry-run
+```
+
+Use Python 3.11 or newer (`python3` on systems that use that executable name). Actual installation with `python scripts/install.py` requires a clean committed checkout; it rejects uncommitted changes. Running `bash install.sh` or `./install.ps1` instead prepares a separate checkout of `CAMPIX_REF`.
 
 Always open the interface through `campixd`. Opening `dist/index.html` directly or using a static file server does not provide the authenticated API.
-
-For Raspberry Pi CSI cameras, use the [native Debian installation](docs/DEPLOYMENT.md#native-debian-package-for-raspberry-pi-and-linux), with distribution-matched Picamera2, libcamera, and camera-related Python packages. The fully locked development environment is not a substitute for that native driver environment.
 
 ## Camera paths and compatibility
 
@@ -89,7 +97,20 @@ Read the [deployment guide](docs/DEPLOYMENT.md), [security model](docs/SECURITY.
 
 ## Development and verification
 
+Development setup is separate from the installer. Install Python 3.11 or newer, `uv`, and FFmpeg with `libx264` plus `ffprobe`, then run from the repository root:
+
 ```powershell
+uv sync --locked --extra test --extra v4l2
+.venv\Scripts\campixd.exe init-admin
+.venv\Scripts\campixd.exe serve --demo
+```
+
+`--demo` explicitly enables synthetic input; snapshots, encoded videos, and database records are real. Omit it for normal operation and add a camera in the administrator's **Cameras** view. On Linux, use `.venv/bin/campixd`. CSI capture needs the [native Debian profile](docs/DEPLOYMENT.md#native-debian-package-for-raspberry-pi-and-linux); the locked development environment is not a replacement for distribution-matched camera ABIs.
+
+Run verification in the locked environment:
+
+```powershell
+uv lock --check
 .venv\Scripts\python.exe -m pytest -q
 npm ci --ignore-scripts
 npx playwright install chromium
@@ -110,7 +131,9 @@ Build native packages on a matching Linux host with `scripts/build-deb.py`. Cont
 src/campix/       Service, capture adapters, recording, auth, scheduling, media plane
 dist/            Served web interface and runtime branding assets
 tests/           API, recovery, media-server, and browser integration tests
-scripts/         Packaging, smoke checks, and verified MediaMTX download
+install.sh       Unix one-command bootstrap
+install.ps1      Windows one-command bootstrap
+scripts/         Installer, packaging, smoke checks, and verified MediaMTX download
 packaging/       Native configuration, systemd, Nginx, and package lifecycle files
 docs/            Architecture, operations, security, release evidence, and research
 pictures/        Supplied source graphics, badges, and design iterations

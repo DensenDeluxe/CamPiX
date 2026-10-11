@@ -2,31 +2,129 @@
 
 [Documentation index](README.md) · [Security](SECURITY.md) · [Release readiness](RELEASE-READINESS.md)
 
-## Requirements and installation profiles
+## One-command installation
 
-Windows is a local development, network-camera, and demo environment, not a Raspberry Pi driver host. Python 3.11 or newer, FFmpeg with `libx264`, and `ffprobe` are required. Linux V4L2 also needs OpenCV and `v4l2-ctl`; CSI needs Picamera2/libcamera packages matched to the operating-system release. Do not run two capture applications against the same device simultaneously.
+The all-in-one installer identifies the operating system, CPU architecture, Raspberry Pi board information where exposed by Linux, and visible camera devices. It chooses an installation profile, prepares missing platform prerequisites, installs CamPiX and FFmpeg, downloads checksum-verified MediaMTX by default, and runs terminal setup for an administrator and discovered cameras. Runtime capture and camera controls remain in `campixd`; installation never manufactures a working camera from a board name.
+
+These remote commands require this installer revision to be published first. No publication or deployment is implied by their presence in this checkout.
+
+The Unix one-liner needs Bash and curl. The bootstrap prepares Git and Python when their supported host package manager can supply them. macOS requires Homebrew to be installed first; Windows requires WinGet through Microsoft App Installer. The installer reports these missing bootstrap requirements before continuing.
+
+Linux and macOS:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/DensenDeluxe/CamPiX/main/install.sh | bash
+```
+
+Windows PowerShell:
+
+```powershell
+& ([scriptblock]::Create((Invoke-RestMethod https://raw.githubusercontent.com/DensenDeluxe/CamPiX/main/install.ps1)))
+```
+
+Run from your normal user account in an interactive terminal; root/elevated administrator sessions are rejected. The installer elevates only operations that need system privileges. Administrator passwords are entered privately; never place them in command arguments or shared shell history. After setup, it starts the installed service and verifies its managed process state and an HTTP response belonging to that process at <http://127.0.0.1:8080>. This startup check does not certify camera capture or MediaMTX publishing.
+
+For a review before execution, download and inspect the entrypoint:
+
+```sh
+curl -fL https://raw.githubusercontent.com/DensenDeluxe/CamPiX/main/install.sh -o campix-install.sh
+less campix-install.sh
+bash campix-install.sh
+```
+
+```powershell
+Invoke-WebRequest https://raw.githubusercontent.com/DensenDeluxe/CamPiX/main/install.ps1 -OutFile campix-install.ps1
+Get-Content campix-install.ps1
+& ([scriptblock]::Create((Get-Content -Raw .\campix-install.ps1)))
+```
+
+The entrypoints resolve `CAMPIX_REF` once, check out that exact application commit in a fresh directory, and never overwrite your current checkout. The default is `main`; use an explicit release tag or commit for a reproducible application version. To pin the bootstrap code as well, download it from the same reviewed immutable commit URL instead of `/main/`. Git reference pinning is separate from dependency-download checksum verification.
+
+```sh
+CAMPIX_REF='REPLACE_WITH_RELEASE_TAG_OR_COMMIT' bash campix-install.sh
+```
+
+```powershell
+$env:CAMPIX_REF = 'REPLACE_WITH_RELEASE_TAG_OR_COMMIT'
+& ([scriptblock]::Create((Get-Content -Raw .\campix-install.ps1)))
+```
+
+For this checkout, Python 3.11 or newer can print a read-only plan without downloads, package installation, elevation, or changes to application state:
+
+```sh
+python scripts/install.py --dry-run
+```
+
+To install a reviewed clean committed checkout, run `python scripts/install.py`. Uncommitted source changes are rejected. Use `python3` where that is the platform's executable name. The shell/PowerShell entrypoints prepare a separate checkout of `CAMPIX_REF`; the Python dry run can inspect a locally edited checkout.
+
+Installer options:
+
+| Option               | Behavior                                                                                                                    |
+| -------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `--dry-run`          | Print a read-only host inventory and install plan. Detected problems are included in the plan.                              |
+| `--without-mediamtx` | Skip managed MediaMTX; authenticated MJPEG remains available.                                                               |
+| `--uv PATH`          | Use an existing executable matching pinned uv 0.13.0. Otherwise download a SHA-256-verified pinned executable.              |
+| `--source PATH`      | Install a different clean committed checkout.                                                                               |
+| `--json`             | Print the final installation summary as JSON.                                                                               |
+| `--non-interactive`  | Fail before a fresh installation because secure administrator creation requires a terminal. It supplies no default account. |
+
+The Unix entrypoint forwards these options. The PowerShell entrypoint exposes `-DryRun`, `-WithoutMediaMTX`, `-Uv PATH`, and `-NonInteractive`; use the Python installer for `--source` and `--json`. A downloaded bootstrap's dry run prints its bootstrap plan without fetching source; when invoked from this checkout with Python available, it runs the local Python dry run.
+
+## Platform and camera profiles
+
+| Host profile                                                                 | Installation path                                                                 | Camera boundary                                                                                                                                |
+| ---------------------------------------------------------------------------- | --------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| Debian, Ubuntu, Raspberry Pi OS with system Python 3.11+ and running systemd | Target-native `.deb`, distribution camera dependencies, non-root systemd service  | Linux V4L2; Raspberry Pi CSI when its distribution supplies the required Picamera2/libcamera packages and the sensor is supported by the host. |
+| Linux with DNF, pacman, or Zypper and an active systemd user manager         | System prerequisites plus a private locked user environment and user service      | Linux V4L2 where device access and host drivers are available; Raspberry Pi CSI requires the native Debian profile.                            |
+| macOS with Homebrew and a GUI login session                                  | System prerequisites plus a private locked user environment and LaunchAgent       | Network RTSP/HTTP(S) sources; local Picamera2/V4L2 is unavailable.                                                                             |
+| Windows with winget and Task Scheduler                                       | System prerequisites plus a private locked user environment and limited user task | Network RTSP/HTTP(S) sources; local Picamera2/V4L2 is unavailable.                                                                             |
+
+Profile support is implemented installation logic, not evidence that every distribution, CPU, board, sensor, and package-manager repository has been tested. Unsupported hosts and native systems with unsuitable Python versions fail with a clear requirement rather than silently using an incompatible camera ABI.
+
+FFmpeg must supply `libx264` and `ffprobe`; the installer performs a small software encoding check. Linux V4L2 requires OpenCV and `v4l2-ctl`; Raspberry Pi CSI requires distribution-matched Picamera2/libcamera. Kernel USB/UVC drivers generally belong to the operating system. The installer uses known distribution package sources and reports unavailable CSI prerequisites; it does not guess device-tree overlays, execute vendor install scripts, or perform a distribution upgrade. If Linux identifies an IMX500 sensor on the native Pi profile, the package plan includes the distribution's `imx500-all` firmware package and recommends a reboot. That firmware package does not enable AI inference in CamPiX. Follow the sensor manufacturer's supported instructions for drivers not supplied by the host distribution.
+
+Terminal setup registers only observed capture devices with conservative starting profiles and preserves existing camera profiles. An empty inventory remains empty. Network URLs cannot be discovered from a board inventory: add those sources through the administrator's **Cameras** view. Stop other camera applications before starting CamPiX so that only one capture owner accesses a device. The `probe` inventory and available controls do not certify sensor operation or recording performance; `auto` encoding remains software `libx264`.
 
 The fully locked development and OCI environments use `uv.lock` and `requirements.lock`. The native Debian profile keeps libcamera, Picamera2, NumPy, Pillow, and OpenCV from the same distribution. The `.deb` builder vendors locked web/auth dependencies while obtaining camera-related ABI packages from APT. Each package is tied to its build architecture and Python minor version: do not interchange Bookworm/Trixie or amd64/arm64 builds.
 
-## Windows and local development
+## Installed paths and startup
 
-```powershell
-uv sync --locked --extra test --extra v4l2
-.venv\Scripts\campixd.exe init-admin
-.venv\Scripts\campixd.exe serve --demo
-```
+| Profile        | Configuration and state                                                                                 | Startup                                                                                                   |
+| -------------- | ------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| Native Debian  | `/etc/campix/campix.json`, `/var/lib/campix/`; optional binary `/usr/local/lib/campix/mediamtx-v1.21.2` | `campix.service`, starts now and at system boot under the `campix` account.                               |
+| Portable Linux | `~/.local/share/campix/campix.json`, `~/.local/share/campix/data/`                                      | `~/.config/systemd/user/campix.service`, starts now and at user login. No automatic linger configuration. |
+| macOS          | `~/.local/share/campix/campix.json`, `~/.local/share/campix/data/`                                      | `~/Library/LaunchAgents/org.campix.service.plist`, starts now and at GUI user login.                      |
+| Windows        | `%LOCALAPPDATA%\CamPiX\campix.json`, `%LOCALAPPDATA%\CamPiX\data\`                                      | Task Scheduler task `CamPiX`, starts now and at login as the installing limited user.                     |
 
-Open <http://127.0.0.1:8080>. `serve` without `--demo` does not invent a camera. Data defaults to `.campix/`, or the path specified with `--data-dir` or `CAMPIX_DATA_DIR`. Password prompts do not echo input; do not put passwords in command-line arguments. Global options precede the subcommand, for example:
+Portable releases live under `releases/<full-commit>/` inside the installation directory, with their own `.venv` and optional `tools/mediamtx` executable. Stable configuration and data remain outside the release directory. Portable services write `data/service.log`, rotating at 1 MiB with three retained backups. On Linux also inspect `journalctl --user -u campix`; native logs use `journalctl -u campix`.
+
+Portable background startup ignores ambient `CAMPIX_` environment variables. Change the installed `campix.json` and restart the managed service for configuration changes. The native systemd service continues to support its explicit `/etc/campix/environment` file as described below.
+
+The portable installation also supplies `start-campix` or Windows `start-campix.ps1` for foreground diagnosis. Stop the background service first; two processes must not use the same data directory or capture device. Native services use `sudo systemctl stop campix`, portable Linux uses `systemctl --user stop campix`, macOS uses `launchctl bootout gui/$(id -u)/org.campix.service`, and Windows uses `Stop-ScheduledTask -TaskName CamPiX`. Task cancellation can interrupt recordings; preserve any `.partial` files and follow recovery guidance below.
+
+## Existing installations and failed attempts
+
+The all-in-one entrypoint is for a new installation. It preserves existing accounts, configuration, recordings, and legacy installations. An occupied installation/state target or existing native deployment is rejected with update guidance; rerunning it is not an unattended upgrade or migration. Keep the reported installation paths and failure stage when diagnosing an interrupted attempt.
+
+Failures return nonzero, including dependency downloads, checksums, package operations, administrator setup, and startup checks. Newly installed system prerequisites are retained, since other applications may use them. Bootstrap source staging and partially prepared portable deployments can remain for inspection; the Python installer's temporary build directory is removed. No cleanup operation recursively deletes an arbitrary user-provided path. Account setup must succeed before a new service is activated; a foreign owner of an expected port is not treated as a working CamPiX service.
+
+For an existing deployment, use the backup and update procedure below. Keep a private consistent database/media snapshot, configuration, and the previous application package before changing versions. No automated legacy migration, system-package rollback, or driver replacement is included. After an interrupted setup, inspect the installed configuration and retained state before using the matching installed executable's `setup` command. If a startup definition already exists, review and restart that definition rather than registering a second one. An unfinished portable `install.json` is diagnostic metadata, not a record of successful installation.
+
+## Development and explicit demo mode
+
+Use the [contributor setup](../CONTRIBUTING.md) for a locked development environment. `campixd init-admin` creates the first account; `campixd serve --demo` deliberately selects synthetic images. Omit `--demo` for real sources. Neither the installer nor normal service startup enables synthetic input automatically.
+
+Direct development defaults to `.campix/`, or the path specified with `--data-dir` or `CAMPIX_DATA_DIR`. Use isolated temporary directories for tests. Global CLI options precede the subcommand, for example:
 
 ```powershell
 .venv\Scripts\campixd.exe --data-dir C:\CamPiXData serve
 ```
 
-For Linux development, replace `.venv\Scripts\campixd.exe` with `.venv/bin/campixd`. Use the native profile below for Raspberry Pi CSI capture rather than mixing unrelated pip and distribution camera packages.
+On Linux, use `.venv/bin/campixd`. Use the native profile for Raspberry Pi CSI rather than mixing unrelated pip and distribution camera packages.
 
 ## Native Debian package for Raspberry Pi and Linux
 
-Provide `uv` and Python build tools on the target system or a matching build environment. Raspberry Pi OS needs `python3-picamera2`; that package is not necessarily available on other Debian/Linux distributions.
+The all-in-one installer performs the native package preparation and setup on suitable Debian-family hosts. For a manual build instead, provide `uv` and Python build tools on the target system or a matching build environment. Raspberry Pi OS needs `python3-picamera2`; that package is not necessarily available on other Debian/Linux distributions.
 
 ```sh
 uv sync --locked --extra test
@@ -58,7 +156,17 @@ CAMPIX_SECURE_COOKIES=true
 CAMPIX_TRUST_PROXY=true
 ```
 
-Replace the placeholder with the actual origin and restart the service. Forwarded headers are accepted only from loopback proxies. The CLI rejects public/LAN HTTP origins without secure cookies. The supplied loopback setup uses HTTP only locally. Internet exposure additionally needs a firewall, certificate operations, host patching, and a reviewed media-network configuration.
+For a portable installation, add the equivalent fields to the existing `campix.json`, preserving its generated data and executable paths:
+
+```json
+{
+  "public_origin": "https://camera.example.invalid",
+  "secure_cookies": true,
+  "trust_proxy": true
+}
+```
+
+Replace the placeholder with the actual origin and restart the managed service. Forwarded headers are accepted only from loopback proxies. The CLI rejects public/LAN HTTP origins without secure cookies. The supplied loopback setup uses HTTP only locally. Internet exposure additionally needs a firewall, certificate operations, host patching, and a reviewed media-network configuration.
 
 ## Optional MediaMTX
 
@@ -69,7 +177,7 @@ Replace the placeholder with the actual origin and restart the service. Forwarde
 
 The downloader verifies the SHA-256 checksum of pinned release v1.21.2, preserves its license, and refuses to overwrite an existing file. Managed MediaMTX uses loopback ports 8554, 8888, 8889, 9997, 9998, and ICE/TCP 8189. Those ports must be free. The CamPiX supervisor restarts an exited child process.
 
-For services, use an absolute binary path or a configuration path resolvable from the service's working directory. LAN/WAN requires external MediaMTX with reachable ICE addresses and TURN where necessary. These settings connect an external deployment:
+For services, use an absolute binary path or a configuration path resolvable from the service's working directory. LAN/WAN requires external MediaMTX with reachable ICE addresses and TURN where necessary. To switch an installer-managed setup to an external server, stop CamPiX and set `mediamtx_binary` to `null` in its installed JSON configuration before adding the external settings. These native service environment settings connect an external deployment:
 
 ```text
 CAMPIX_MEDIAMTX_API=http://127.0.0.1:9997
@@ -77,6 +185,8 @@ CAMPIX_MEDIAMTX_RTSP=rtsp://127.0.0.1:8554
 CAMPIX_MEDIAMTX_TOKEN=<private API/WHEP token, if required>
 CAMPIX_MEDIAMTX_HLS_TOKEN=<private secret matching hlsCDNSecret>
 ```
+
+For portable background startup, set `mediamtx_api`, `mediamtx_rtsp`, `mediamtx_token`, and `mediamtx_hls_token` in the installed `campix.json` instead of environment variables, and restart the managed service.
 
 The external server must be in the same host/proxy network; HLS/WHEP HTTP ports are currently 8888/8889. Do not place secrets in Git, shared URLs, or configuration exports. External RTSP publishing also requires matching permissions, such as private network binding and credentials in the server-side RTSP origin. Managed mode does not expose anonymous network streams.
 
@@ -98,10 +208,10 @@ The Dockerfile's default `PYTHON_IMAGE` is digest-pinned. If overriding it, use 
 
 - **Storage reserve:** insufficient free space prevents new recordings and interrupts running encoders with an error event. Hourly retention removes expired, unlocked media; locked recordings remain. The reserve is not a quota against other processes.
 - **Interrupted recording:** a clean service shutdown finalizes recordings. Power loss may leave `.partial` MP4 files; they are not presented as completed recordings and are not automatically deleted. Make a separate copy before attempting repair.
-- **Database backup:** `campixd --config /etc/campix/campix.json backup /secure/path/campix.sqlite3` produces a consistent SQLite backup without active sessions. It still contains password hashes and potentially private camera URLs. Use mode `0600`, external encryption, and restricted access. Back up media separately; stop the service during the database/media backup for a matching snapshot.
+- **Database backup:** `campixd --config /etc/campix/campix.json backup /secure/path/campix.sqlite3` produces a consistent SQLite backup without active sessions. For portable profiles, use the installed executable and configuration path listed above. The backup still contains password hashes and potentially private camera URLs. Use mode `0600`, external encryption, and restricted access. Back up media separately; stop the service during the database/media backup for a matching snapshot.
 - **Restore:** stop the service and restore matching database and media backups into a new private data directory. Verify `campix` ownership and `0700`/`0600` permissions before starting. Never copy an old database over an active WAL database.
 - **Account recovery:** run `sudo -u campix campixd --config /etc/campix/campix.json reset-password admin`. All sessions for that account are revoked. This requires existing access to the private data directory.
-- **Updates:** back up first. Schema 1 migrates to 2; downgrading an unknown newer schema is blocked. Package removal retains media and accounts. Roll back with a matching older database backup and package version.
+- **Updates:** back up first. Schema 1 migrates to 2; downgrading an unknown newer schema is blocked. The one-command installer does not update an existing deployment. Native updates use a reviewed matching `.deb` package; portable updates require review of the release environment and its startup paths. Package removal retains media and accounts. Roll back with a matching older database backup and application version.
 - **Monitoring:** `/healthz` checks HTTP liveness. Use authenticated `/api/v1/system`, camera frame age, `scheduler_alive`, MediaMTX readiness, and `/metrics` for operational monitoring. A green HTTP check does not qualify an offline camera.
 
 ## Before production use

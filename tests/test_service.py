@@ -1,5 +1,6 @@
 import io
 import json
+import os
 import shutil
 import subprocess
 import time
@@ -25,6 +26,13 @@ def wait_online(client):
             return response.json()[0]
         time.sleep(0.05)
     raise AssertionError("Synthetic camera did not deliver frames")
+
+
+def test_health_identifies_the_responding_service_process(client):
+    response = client.get("/healthz")
+    assert response.status_code == 200
+    assert response.json()["process_id"] == os.getpid()
+    assert response.json()["status"] == "ok"
 
 
 def test_auth_csrf_roles_and_session_revocation(client):

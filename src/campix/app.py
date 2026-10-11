@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import sqlite3
 import time
 from contextlib import asynccontextmanager
@@ -203,7 +204,7 @@ def create_app(settings: Settings | None = None):
 
     @app.get("/healthz")
     def health():
-        return {"status": "ok", "version": __version__}
+        return {"status": "ok", "version": __version__, "process_id": os.getpid()}
 
     @app.get("/api/v1/openapi", dependencies=[Depends(viewer)])
     def openapi():

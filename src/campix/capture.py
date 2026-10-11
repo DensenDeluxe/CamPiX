@@ -348,34 +348,6 @@ def make_backend(config, ffmpeg):
 
 
 def discover():
-    devices = []
-    try:
-        from picamera2 import Picamera2
+    from .provision import discover_inventory
 
-        for item in Picamera2.global_camera_info():
-            devices.append(
-                {
-                    "backend": "picamera2",
-                    "source": str(item["Num"]),
-                    "model": item.get("Model", "libcamera"),
-                    "status": "detected",
-                }
-            )
-    except (ImportError, RuntimeError):
-        pass
-    for path in Path("/sys/class/video4linux").glob("video*"):
-        try:
-            name = (path / "name").read_text().strip()
-            if any(token in name.lower() for token in ("codec", "isp", "pisp")):
-                continue
-            devices.append(
-                {
-                    "backend": "v4l2",
-                    "source": "/dev/" + path.name,
-                    "model": name,
-                    "status": "detected-not-opened",
-                }
-            )
-        except OSError:
-            continue
-    return devices
+    return discover_inventory()["devices"]

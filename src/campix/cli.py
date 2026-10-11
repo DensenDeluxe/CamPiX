@@ -35,6 +35,12 @@ def main():
     serve.add_argument("--demo", action="store_true", default=None)
     serve.add_argument("--mediamtx-binary")
     sub.add_parser("probe", help="Print detected capture devices and FFmpeg encoders")
+    setup = sub.add_parser("setup", help="Create the first admin and add detected physical cameras")
+    setup.add_argument("--username", default="admin", help="First administrator username")
+    setup.add_argument(
+        "--non-interactive", action="store_true", help="Require an existing administrator"
+    )
+    setup.add_argument("--json", action="store_true", help="Print the setup summary as JSON")
     backup = sub.add_parser(
         "backup", help="Consistent SQLite backup (contains credential hashes; keep private)"
     )
@@ -49,14 +55,51 @@ def main():
         demo=getattr(args, "demo", None),
         mediamtx_binary=getattr(args, "mediamtx_binary", None),
     )
+    if args.command == "setup":
+        from .provision import ProvisionError
+        from .provision import setup as provision
+
+        def read_password():
+            if not sys.stdin.isatty():
+                raise ProvisionError(
+                    "Admin setup requires an interactive terminal; use init-admin --password-stdin for automation"
+                )
+            password = getpass.getpass("Admin password (at least 12 characters): ")
+            if password != getpass.getpass("Repeat password: "):
+                raise ProvisionError("Passwords do not match")
+            return password
+
+        try:
+            result = provision(
+                settings,
+                non_interactive=args.non_interactive,
+                username=args.username,
+                password_reader=read_password,
+            )
+        except (ProvisionError, RuntimeError) as exc:
+            parser.error(str(exc))
+        if args.json:
+            print(json.dumps(result, indent=2))
+        else:
+            if result["admin_created"]:
+                print("Administrator created.")
+            print(
+                f"Added {len(result['cameras_added'])} physical camera profile(s); existing profiles preserved."
+            )
+            print(
+                "Detection does not qualify hardware. Verify capture, recording, and disconnect recovery on this device."
+            )
+            for diagnostic in result["diagnostics"]:
+                print(f"{diagnostic['code']}: {diagnostic['message']}")
+        return
     settings.prepare()
     if args.command == "probe":
-        from .capture import discover
+        from .provision import discover_inventory
         from .recording import encoder_probe
 
         print(
             json.dumps(
-                {"devices": discover(), "encoding": encoder_probe(settings.ffmpeg)}, indent=2
+                {**discover_inventory(), "encoding": encoder_probe(settings.ffmpeg)}, indent=2
             )
         )
         return
@@ -93,6 +136,7 @@ def main():
             workers=1,
             proxy_headers=settings.trust_proxy,
             forwarded_allow_ips="127.0.0.1,::1",
+            log_config=None,
             access_log=False,
             timeout_graceful_shutdown=40,
         )

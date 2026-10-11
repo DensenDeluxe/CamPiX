@@ -1,0 +1,4 @@
+# Preserve executable POSIX entry points in Windows checkouts and native packages.
+install.sh text eol=lf
+packaging/postinst text eol=lf
+packaging/prerm text eol=lf
