@@ -34,6 +34,7 @@ V4L2_CAP_STREAMING = 0x04000000
 V4L2_CAP_DEVICE_CAPS = 0x80000000
 INVENTORY_LIMIT = 64
 INVENTORY_BYTES = 65536
+RESERVED_ADMIN_NAMES = frozenset({"admin", "administrator", "root"})
 DSHOW_DEVICE = re.compile(r'^\[[^\]]*\]\s+"(?P<name>[^"]+)"(?:\s+\((?P<kinds>[^)]*)\))?\s*$')
 DSHOW_ALTERNATIVE = re.compile(r'^\[[^\]]*\]\s+Alternative name "(?P<name>[^"]+)"\s*$')
 
@@ -404,23 +405,45 @@ def _admin_state(path: Path, username: str) -> tuple[bool, bool]:
         ) from exc
 
 
+def admin_username_problem(username: str) -> str | None:
+    """Explain why a name cannot own the first administrator account, or return None."""
+    # Predictable account names are the first target of password guessing.
+    if username.casefold() in RESERVED_ADMIN_NAMES:
+        return f"'{username}' is a predictable account name; choose a personal username"
+    try:
+        UserCreate(username=username, password="x" * 12, role="admin")
+    except ValueError:
+        return "Use 1-64 letters, digits, dots, underscores, or hyphens, starting with a letter or digit"
+    return None
+
+
 def setup(
     settings: Settings,
     *,
     non_interactive: bool = False,
-    username: str = "admin",
+    username: str | None = None,
+    username_reader: Callable[[], str] | None = None,
     password_reader: Callable[[], str] | None = None,
 ) -> dict:
     """Add missing physical camera profiles while preserving all existing application state."""
     path = settings.data_dir / "campix.sqlite3"
-    ready, occupied = _admin_state(path, username)
+    ready, _ = _admin_state(path, username or "")
     password_hash = None
     if not ready:
         if non_interactive or password_reader is None:
             raise ProvisionError(
                 "No enabled administrator exists. Run campixd setup from an interactive terminal, "
-                "or create one securely with campixd init-admin --password-stdin before non-interactive setup."
+                "or create one securely with campixd init-admin --username NAME --password-stdin "
+                "before non-interactive setup."
             )
+        if username is None:
+            if username_reader is None:
+                raise ProvisionError("A first administrator username is required")
+            username = username_reader()
+        problem = admin_username_problem(username)
+        if problem:
+            raise ProvisionError(problem)
+        _, occupied = _admin_state(path, username)
         if occupied:
             raise ProvisionError(
                 "The requested admin username already exists. Use setup --username with a new name "

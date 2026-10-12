@@ -36,7 +36,7 @@ def main():
     serve.add_argument("--mediamtx-binary")
     sub.add_parser("probe", help="Print detected capture devices and FFmpeg encoders")
     setup = sub.add_parser("setup", help="Create the first admin and add detected physical cameras")
-    setup.add_argument("--username", default="admin", help="First administrator username")
+    setup.add_argument("--username", help="First administrator username (prompted when omitted)")
     setup.add_argument(
         "--non-interactive", action="store_true", help="Require an existing administrator"
     )
@@ -56,24 +56,44 @@ def main():
         mediamtx_binary=getattr(args, "mediamtx_binary", None),
     )
     if args.command == "setup":
-        from .provision import ProvisionError
+        from .provision import ProvisionError, admin_username_problem
         from .provision import setup as provision
 
-        def read_password():
+        def require_terminal():
             if not sys.stdin.isatty():
                 raise ProvisionError(
                     "Admin setup requires an interactive terminal; use init-admin --password-stdin for automation"
                 )
-            password = getpass.getpass("Admin password (at least 12 characters): ")
-            if password != getpass.getpass("Repeat password: "):
-                raise ProvisionError("Passwords do not match")
-            return password
+
+        # A typing mistake must not abort an installation half-way, so offer retries.
+        def read_username():
+            require_terminal()
+            for _ in range(3):
+                username = input("Administrator username: ").strip()
+                problem = admin_username_problem(username)
+                if not problem:
+                    return username
+                print(problem, file=sys.stderr)
+            raise ProvisionError("No valid administrator username was entered")
+
+        def read_password():
+            require_terminal()
+            for _ in range(3):
+                password = getpass.getpass("Admin password (12-128 characters): ")
+                if not 12 <= len(password) <= 128:
+                    print("The password must contain 12-128 characters", file=sys.stderr)
+                elif password != getpass.getpass("Repeat password: "):
+                    print("Passwords do not match", file=sys.stderr)
+                else:
+                    return password
+            raise ProvisionError("No matching administrator password was entered")
 
         try:
             result = provision(
                 settings,
                 non_interactive=args.non_interactive,
                 username=args.username,
+                username_reader=read_username,
                 password_reader=read_password,
             )
         except (ProvisionError, RuntimeError) as exc:

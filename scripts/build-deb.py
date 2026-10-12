@@ -8,10 +8,25 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+MANAGER_FILES = ("manage.py", "install.py", "install_startup.py")
 
 
 def run(*command):
     subprocess.run(command, cwd=ROOT, check=True)
+
+
+def stage_manager(lib: Path, bin_dir: Path) -> None:
+    """Ship the stdlib-only `campix` manager; it works when the application is damaged."""
+    manager = lib / "manager"
+    manager.mkdir()
+    for name in MANAGER_FILES:
+        shutil.copy2(ROOT / "scripts" / name, manager / name)
+    command = bin_dir / "campix"
+    command.write_text(
+        '#!/bin/sh\nexec /usr/bin/python3 -I /usr/lib/campix/manager/manage.py "$@"\n',
+        encoding="utf-8",
+    )
+    command.chmod(0o755)
 
 
 def main():
@@ -83,6 +98,7 @@ def main():
             "#!/usr/bin/python3\nimport sys\nsys.path.insert(0, '/usr/lib/campix/vendor')\nsys.path.insert(0, '/usr/lib/campix')\nfrom campix.cli import main\nmain()\n"
         )
         entry.chmod(0o755)
+        stage_manager(lib, bin_dir)
         etc = stage / "etc/campix"
         etc.mkdir(parents=True)
         shutil.copy2(ROOT / "packaging/campix.json", etc / "campix.json")

@@ -17,13 +17,17 @@ import platform
 import re
 import shlex
 import shutil
+import sqlite3
+import stat
 import subprocess
 import sys
 import tarfile
 import tempfile
 import threading
+import time
 import urllib.request
 import zipfile
+from contextlib import closing
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -31,10 +35,20 @@ from install_startup import (
     activate_portable,
     check_ports,
     check_startup_available,
+    command_on_path,
+    install_command,
+    replace_portable,
+    stop_portable,
+    wait_for_free_ports,
     wait_for_listener,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
+REPOSITORY = "https://github.com/DensenDeluxe/CamPiX.git"
+# The `campix` command runs these stdlib-only files with the installation's base Python.
+MANAGER_FILES = ("manage.py", "install.py", "install_startup.py", "install-startup.ps1")
+NATIVE_MARKER = Path("/etc/campix/install.json")
+NATIVE_PACKAGE_STORE = Path("/var/lib/campix-installer")
 UV_VERSION = "0.13.0"
 MEDIAMTX_VERSION = "1.21.2"
 DOWNLOAD_LIMIT = 100 * 1024 * 1024
@@ -522,6 +536,53 @@ def private_json(path: Path, values: dict) -> None:
     path.chmod(0o600)
 
 
+def replace_json(path: Path, values: dict) -> None:
+    """Atomically replace an installer-owned private JSON file."""
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(json.dumps(values, indent=2) + "\n", encoding="utf-8")
+    temporary.chmod(0o600)
+    os.replace(temporary, path)
+
+
+def remove_tree(path: Path) -> None:
+    """Remove an installer-owned directory, including read-only Windows files."""
+
+    def writable(function, name, _error):
+        os.chmod(name, stat.S_IWRITE)
+        function(name)
+
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=writable)
+    else:
+        shutil.rmtree(path, onerror=writable)
+
+
+def read_marker(path: Path) -> dict:
+    try:
+        marker = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise InstallError(f"No CamPiX installation metadata was found at {path}.") from exc
+    if not isinstance(marker, dict) or not re.fullmatch(
+        r"[0-9a-f]{40}", str(marker.get("revision"))
+    ):
+        raise InstallError("Installation metadata is invalid; reinstall CamPiX.")
+    return marker
+
+
+def installed_marker(
+    profile: str, revision: str, previous: str | None, repository: str, status: str = "ready"
+) -> dict:
+    return {
+        "format": 2,
+        "profile": profile,
+        "revision": revision,
+        "previous": previous,
+        "status": status,
+        "python": "/usr/bin/python3" if profile == "native-debian" else sys.executable,
+        "repository": repository,
+    }
+
+
 def tool_environment(uv: Path, environment: Path, ffmpeg: Path) -> dict[str, str]:
     env = {
         key: value
@@ -539,21 +600,20 @@ def tool_environment(uv: Path, environment: Path, ffmpeg: Path) -> dict[str, str
 
 def setup_command(command: list[str | Path], non_interactive: bool, *, env: dict[str, str]) -> None:
     options = ["--non-interactive"] if non_interactive else []
-    # Password input is inherited from the terminal and never captured or logged.
+    # Account input is inherited from the terminal and never captured or logged.
     run([*command, "setup", *options], env=env, timeout=None if not non_interactive else 120)
 
 
-def native_install(
-    source: Path, host: Host, plan: dict, scratch: Path, args: argparse.Namespace
-) -> dict:
-    ensure_native_fresh()
-    install_host_packages(host, plan["packages"])
-    ffmpeg, _ = validate_encoder(host)
-    if host.raspberry_pi:
-        run(
-            ["/usr/bin/python3", "-c", "import picamera2, libcamera, numpy, PIL, cv2"], capture=True
-        )
-    uv = provision_uv(host, scratch / "tools", args.uv)
+NATIVE_CONFIG = Path("/etc/campix/campix.json")
+NATIVE_DATA = Path("/var/lib/campix")
+
+
+def native_pid() -> int:
+    output = run(["systemctl", "show", "campix", "--property=MainPID", "--value"], capture=True)
+    return int(output.stdout.strip() or "0")
+
+
+def build_native_package(source: Path, scratch: Path, uv: Path, ffmpeg: Path) -> tuple[Path, dict]:
     environment = scratch / "build-env"
     env = tool_environment(uv, environment, ffmpeg)
     run(
@@ -580,67 +640,95 @@ def native_install(
     built = list(packages.glob("campix_*.deb"))
     if len(built) != 1:
         raise InstallError("Native package build did not produce exactly one package.")
-    media = None
-    if not args.without_mediamtx:
-        media = scratch / "mediamtx"
-        run(
-            ["/usr/bin/python3", source / "scripts/fetch-mediamtx.py", "--output", media],
-            timeout=180,
-        )
-    run(["sudo", "apt-get", "install", "-y", str(built[0])], timeout=1800)
-    smoke_env = {**env, "PYTHONPATH": "/usr/lib/campix:/usr/lib/campix/vendor"}
-    run(["/usr/bin/python3", source / "scripts/package-smoke.py"], env=smoke_env)
-    config = json.loads((source / "packaging/campix.json").read_text(encoding="utf-8"))
-    config["ffmpeg"] = str(ffmpeg)
-    if media:
-        installed_media = Path(f"/usr/local/lib/campix/mediamtx-v{MEDIAMTX_VERSION}")
-        run(["sudo", "install", "-d", "-m", "0755", installed_media.parent])
-        run(["sudo", "install", "-m", "0755", media, installed_media])
-        run(
-            [
-                "sudo",
-                "install",
-                "-m",
-                "0644",
-                media.with_suffix(".LICENSE"),
-                installed_media.with_suffix(".LICENSE"),
-            ]
-        )
-        config["mediamtx_binary"] = str(installed_media)
-    config_file = scratch / "campix.json"
-    private_json(config_file, config)
-    installed_config = Path("/etc/campix/campix.json")
+    return built[0], env
+
+
+def fetch_native_media(source: Path, scratch: Path) -> Path:
+    media = scratch / "mediamtx"
+    run(["/usr/bin/python3", source / "scripts/fetch-mediamtx.py", "--output", media], timeout=180)
+    return media
+
+
+def install_native_media(media: Path) -> Path:
+    installed_media = Path(f"/usr/local/lib/campix/mediamtx-v{MEDIAMTX_VERSION}")
+    run(["sudo", "install", "-d", "-m", "0755", installed_media.parent])
+    run(["sudo", "install", "-m", "0755", media, installed_media])
     run(
         [
             "sudo",
             "install",
             "-m",
-            "0640",
-            "-o",
-            "root",
-            "-g",
-            "campix",
-            config_file,
-            installed_config,
+            "0644",
+            media.with_suffix(".LICENSE"),
+            installed_media.with_suffix(".LICENSE"),
         ]
     )
+    return installed_media
+
+
+def install_native_config(config: dict, scratch: Path) -> None:
+    config_file = scratch / "campix.json"
+    replace_json(config_file, config)
+    run(["sudo", "install", "-m", "0640", "-o", "root", "-g", "campix", config_file, NATIVE_CONFIG])
+
+
+def record_native_install(package: Path, marker: dict, scratch: Path) -> None:
+    """Keep the installed package for rollback and repair, then record the revision."""
+    run(["sudo", "install", "-d", "-m", "0755", NATIVE_PACKAGE_STORE])
+    run(
+        [
+            "sudo",
+            "install",
+            "-m",
+            "0644",
+            package,
+            NATIVE_PACKAGE_STORE / f"campix-{marker['revision']}.deb",
+        ]
+    )
+    keep = {f"campix-{marker['revision']}.deb", f"campix-{marker.get('previous')}.deb"}
+    for stored in sorted(NATIVE_PACKAGE_STORE.glob("campix-*.deb")):
+        if stored.name not in keep:
+            run(["sudo", "rm", "-f", stored])
+    file = scratch / "install.json"
+    replace_json(file, marker)
+    run(["sudo", "install", "-m", "0644", file, NATIVE_MARKER])
+
+
+def native_install(
+    source: Path,
+    revision: str,
+    host: Host,
+    plan: dict,
+    scratch: Path,
+    args: argparse.Namespace,
+) -> dict:
+    ensure_native_fresh()
+    install_host_packages(host, plan["packages"])
+    ffmpeg, _ = validate_encoder(host)
+    if host.raspberry_pi:
+        run(
+            ["/usr/bin/python3", "-c", "import picamera2, libcamera, numpy, PIL, cv2"], capture=True
+        )
+    uv = provision_uv(host, scratch / "tools", args.uv)
+    package, env = build_native_package(source, scratch, uv, ffmpeg)
+    media = None if args.without_mediamtx else fetch_native_media(source, scratch)
+    run(["sudo", "apt-get", "install", "-y", str(package)], timeout=1800)
+    smoke_env = {**env, "PYTHONPATH": "/usr/lib/campix:/usr/lib/campix/vendor"}
+    run(["/usr/bin/python3", source / "scripts/package-smoke.py"], env=smoke_env)
+    config = json.loads((source / "packaging/campix.json").read_text(encoding="utf-8"))
+    config["ffmpeg"] = str(ffmpeg)
+    if media:
+        config["mediamtx_binary"] = str(install_native_media(media))
+    install_native_config(config, scratch)
     setup_command(
-        ["sudo", "-u", "campix", "/usr/bin/campixd", "--config", installed_config],
+        ["sudo", "-u", "campix", "/usr/bin/campixd", "--config", NATIVE_CONFIG],
         args.non_interactive,
         env=env,
     )
     check_ports(config)
     try:
         run(["sudo", "systemctl", "enable", "--now", "campix"])
-        wait_for_listener(
-            8080,
-            lambda: int(
-                run(
-                    ["systemctl", "show", "campix", "--property=MainPID", "--value"], capture=True
-                ).stdout.strip()
-                or "0"
-            ),
-        )
+        wait_for_listener(8080, native_pid)
         run(["systemctl", "is-active", "--quiet", "campix"])
     except (RuntimeError, InstallError):
         try:
@@ -651,15 +739,137 @@ def native_install(
                 file=sys.stderr,
             )
         raise
+    repository = getattr(args, "repository", REPOSITORY)
+    record_native_install(
+        package, installed_marker("native-debian", revision, None, repository), scratch
+    )
     return {
         "profile": "native-debian",
-        "config": str(installed_config),
-        "data": "/var/lib/campix",
+        "config": str(NATIVE_CONFIG),
+        "data": str(NATIVE_DATA),
         "service": "campix",
-        "start": "sudo systemctl start campix",
+        "start": "campix start",
+        "command": "/usr/bin/campix",
+        "command_on_path": True,
         "hardware_qualified": False,
         "reboot_recommended": "imx500-all" in plan["packages"],
     }
+
+
+def native_backup(revision: str) -> Path:
+    backups = NATIVE_DATA / "backups"
+    run(["sudo", "install", "-d", "-m", "0700", "-o", "campix", "-g", "campix", backups])
+    target = backups / f"campix-{revision[:12]}-{time.strftime('%Y%m%d-%H%M%S')}.sqlite3"
+    command = ["sudo", "-u", "campix", "/usr/bin/campixd", "--config", NATIVE_CONFIG]
+    run([*command, "backup", target])
+    return target
+
+
+def native_restore(backup: Path) -> None:
+    database = NATIVE_DATA / "campix.sqlite3"
+    run(["sudo", "-u", "campix", "rm", "-f", f"{database}-wal", f"{database}-shm"])
+    run(["sudo", "-u", "campix", "cp", backup, database])
+
+
+def native_reinstall(package: Path) -> None:
+    run(
+        ["sudo", "apt-get", "install", "--reinstall", "--allow-downgrades", "-y", str(package)],
+        timeout=1800,
+    )
+
+
+def native_update(
+    source: Path,
+    revision: str,
+    host: Host,
+    plan: dict,
+    scratch: Path,
+    args: argparse.Namespace,
+) -> dict:
+    marker = read_marker(NATIVE_MARKER)
+    current = marker["revision"]
+    if marker.get("status", "ready") != "ready":
+        raise InstallError("A previous update did not finish; run campix repair first.")
+    if revision == current:
+        raise InstallError("This revision is already installed; use campix repair to rebuild it.")
+    install_host_packages(host, plan["packages"])
+    ffmpeg, _ = validate_encoder(host)
+    uv = provision_uv(host, scratch / "tools", args.uv)
+    package, env = build_native_package(source, scratch, uv, ffmpeg)
+    config = json.loads(run(["sudo", "cat", NATIVE_CONFIG], capture=True).stdout)
+    updated = dict(config)
+    if config.get("mediamtx_binary") and not str(config["mediamtx_binary"]).endswith(
+        f"mediamtx-v{MEDIAMTX_VERSION}"
+    ):
+        updated["mediamtx_binary"] = str(install_native_media(fetch_native_media(source, scratch)))
+    previous_package = NATIVE_PACKAGE_STORE / f"campix-{current}.deb"
+    port = config.get("port", 8080)
+    run(["sudo", "systemctl", "stop", "campix"])
+    backup = native_backup(current)
+    try:
+        native_reinstall(package)
+        smoke_env = {**env, "PYTHONPATH": "/usr/lib/campix:/usr/lib/campix/vendor"}
+        run(["/usr/bin/python3", source / "scripts/package-smoke.py"], env=smoke_env)
+        if updated != config:
+            install_native_config(updated, scratch)
+        run(["sudo", "systemctl", "start", "campix"])
+        wait_for_listener(port, native_pid)
+    except (RuntimeError, InstallError) as exc:
+        run(["sudo", "systemctl", "stop", "campix"], check=False)
+        if previous_package.is_file():
+            native_reinstall(previous_package)
+        native_restore(backup)
+        if updated != config:
+            install_native_config(config, scratch)
+        try:
+            run(["sudo", "systemctl", "start", "campix"])
+            wait_for_listener(port, native_pid)
+        except (RuntimeError, InstallError) as again:
+            raise InstallError(
+                "Update failed and the previous version did not restart; run campix repair."
+            ) from again
+        raise InstallError(
+            f"Update to {revision[:12]} failed; CamPiX {current[:12]} was restored."
+        ) from exc
+    record_native_install(
+        package, installed_marker("native-debian", revision, current, args.repository), scratch
+    )
+    return {"profile": "native-debian", "revision": revision, "previous": current}
+
+
+def native_repair(
+    source: Path,
+    revision: str,
+    host: Host,
+    plan: dict,
+    scratch: Path,
+    args: argparse.Namespace,
+) -> dict:
+    """Rebuild and reinstall the installed revision; accounts and media stay untouched."""
+    marker = read_marker(NATIVE_MARKER)
+    if revision != marker["revision"]:
+        raise InstallError("Repair rebuilds the installed revision only.")
+    install_host_packages(host, plan["packages"])
+    ffmpeg, _ = validate_encoder(host)
+    uv = provision_uv(host, scratch / "tools", args.uv)
+    package, _ = build_native_package(source, scratch, uv, ffmpeg)
+    config = json.loads(run(["sudo", "cat", NATIVE_CONFIG], capture=True).stdout)
+    if config.get("mediamtx_binary") and not Path(config["mediamtx_binary"]).is_file():
+        config["mediamtx_binary"] = str(install_native_media(fetch_native_media(source, scratch)))
+        install_native_config(config, scratch)
+    run(["sudo", "systemctl", "stop", "campix"], check=False)
+    native_reinstall(package)
+    run(["sudo", "install", "-d", "-m", "0700", "-o", "campix", "-g", "campix", NATIVE_DATA])
+    run(["sudo", "systemctl", "enable", "--now", "campix"])
+    wait_for_listener(config.get("port", 8080), native_pid)
+    record_native_install(
+        package,
+        installed_marker(
+            "native-debian", revision, marker.get("previous"), marker.get("repository", REPOSITORY)
+        ),
+        scratch,
+    )
+    return {"profile": "native-debian", "revision": revision, "repaired": True}
 
 
 def portable_root(host: Host) -> Path:
@@ -698,24 +908,9 @@ def copy_source(source: Path, release: Path) -> None:
         shutil.copy2(original, destination)
 
 
-def portable_install(
-    source: Path, revision: str, host: Host, scratch: Path, args: argparse.Namespace
-) -> dict:
-    root = portable_root(host)
-    ensure_portable_fresh(root)
-    check_startup_available()
-    try:
-        executable("ffmpeg", host)
-        executable("ffprobe", host)
-    except InstallError:
-        install_host_packages(host, ["ffmpeg"])
-    ffmpeg, _ = validate_encoder(host)
-    uv = provision_uv(host, scratch / "tools", args.uv)
-    root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    marker = root / "install.json"
-    private_json(marker, {"format": 1, "revision": revision, "status": "preparing"})
-    release = root / "releases" / revision
-    release.parent.mkdir(mode=0o700)
+def build_release(
+    source: Path, release: Path, uv: Path, ffmpeg: Path, windows: bool, mediamtx: bool
+) -> tuple[Path, Path | None, dict[str, str]]:
     copy_source(source, release)
     environment = release / ".venv"
     env = tool_environment(uv, environment, ffmpeg)
@@ -725,23 +920,22 @@ def portable_install(
         env=env,
         timeout=1800,
     )
-    windows = host.system == "windows"
     python = environment / ("Scripts/python.exe" if windows else "bin/python")
     daemon = environment / ("Scripts/campixd.exe" if windows else "bin/campixd")
     run([python, release / "scripts/package-smoke.py"], env=env)
-    config = {
-        "data_dir": str(root / "data"),
-        "host": "127.0.0.1",
-        "demo": False,
-        "ffmpeg": str(ffmpeg),
-    }
-    if not args.without_mediamtx:
+    media = None
+    if mediamtx:
         media = release / "tools" / ("mediamtx.exe" if windows else "mediamtx")
         run([python, release / "scripts/fetch-mediamtx.py", "--output", media], timeout=180)
-        config["mediamtx_binary"] = str(media)
-    config_file = root / "campix.json"
-    private_json(config_file, config)
-    setup_command([daemon, "--config", config_file], args.non_interactive, env=env)
+    return daemon, media, env
+
+
+def release_daemon(release: Path, windows: bool) -> Path:
+    return release / ".venv" / ("Scripts/campixd.exe" if windows else "bin/campixd")
+
+
+def write_launcher(root: Path, daemon: Path, config_file: Path, windows: bool) -> Path:
+    """Write the foreground launcher used for diagnosis while the service is stopped."""
     if windows:
         launcher = root / "start-campix.ps1"
 
@@ -758,12 +952,105 @@ def portable_install(
             encoding="utf-8",
         )
         launcher.chmod(0o700)
-    startup = activate_portable(daemon, config_file, release)
-    # Updating this installer-owned marker is safe; application state is separate.
-    marker.write_text(
-        json.dumps({"format": 1, "revision": revision, "status": "ready"}, indent=2) + "\n",
-        encoding="utf-8",
+    return launcher
+
+
+def install_manager(release: Path, root: Path) -> Path:
+    """Copy the stdlib-only manager beside the releases and expose the `campix` command."""
+    manager, staging = root / "manager", root / "manager.new"
+    if staging.exists():
+        remove_tree(staging)
+    staging.mkdir(mode=0o700)
+    for name in MANAGER_FILES:
+        shutil.copy2(release / "scripts" / name, staging / name)
+    if manager.exists():
+        remove_tree(manager)
+    staging.rename(manager)
+    return install_command(root, sys.executable)
+
+
+def backup_database(root: Path, revision: str) -> Path | None:
+    """Copy the stopped service's database; keep the three newest copies."""
+    database = root / "data" / "campix.sqlite3"
+    if not database.is_file():
+        return None
+    backups = root / "backups"
+    backups.mkdir(mode=0o700, exist_ok=True)
+    target = backups / f"campix-{revision[:12]}-{time.strftime('%Y%m%d-%H%M%S')}.sqlite3"
+    uri = database.resolve().as_uri() + "?mode=ro"
+    with (
+        closing(sqlite3.connect(uri, uri=True)) as current,
+        closing(sqlite3.connect(target)) as copy,
+    ):
+        current.backup(copy)
+    target.chmod(0o600)
+    for old in sorted(backups.glob("campix-*.sqlite3"), key=lambda path: path.stat().st_mtime)[:-3]:
+        old.unlink()
+    return target
+
+
+def restore_database(root: Path, backup: Path | None) -> None:
+    if backup is None:
+        return
+    database = root / "data" / "campix.sqlite3"
+    for suffix in ("-wal", "-shm"):
+        Path(f"{database}{suffix}").unlink(missing_ok=True)
+    shutil.copy2(backup, database)
+    database.chmod(0o600)
+
+
+def prune_releases(releases: Path, keep: set[str]) -> None:
+    for item in sorted(releases.iterdir()):
+        if item.name in keep or item.is_symlink() or not item.is_dir():
+            continue
+        if re.fullmatch(r"[0-9a-f]{40}", item.name):
+            try:
+                remove_tree(item)
+            except OSError:
+                print(
+                    f"Could not remove old release {item.name}; remove it later.", file=sys.stderr
+                )
+
+
+def portable_install(
+    source: Path, revision: str, host: Host, scratch: Path, args: argparse.Namespace
+) -> dict:
+    root = portable_root(host)
+    ensure_portable_fresh(root)
+    check_startup_available()
+    try:
+        executable("ffmpeg", host)
+        executable("ffprobe", host)
+    except InstallError:
+        install_host_packages(host, ["ffmpeg"])
+    ffmpeg, _ = validate_encoder(host)
+    uv = provision_uv(host, scratch / "tools", args.uv)
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    marker = root / "install.json"
+    repository = getattr(args, "repository", REPOSITORY)
+    private_json(marker, installed_marker("portable-user", revision, None, repository, "preparing"))
+    release = root / "releases" / revision
+    release.parent.mkdir(mode=0o700)
+    windows = host.system == "windows"
+    daemon, media, env = build_release(
+        source, release, uv, ffmpeg, windows, not args.without_mediamtx
     )
+    config = {
+        "data_dir": str(root / "data"),
+        "host": "127.0.0.1",
+        "demo": False,
+        "ffmpeg": str(ffmpeg),
+    }
+    if media:
+        config["mediamtx_binary"] = str(media)
+    config_file = root / "campix.json"
+    private_json(config_file, config)
+    setup_command([daemon, "--config", config_file], args.non_interactive, env=env)
+    launcher = write_launcher(root, daemon, config_file, windows)
+    startup = activate_portable(daemon, config_file, release)
+    command = install_manager(release, root)
+    # Updating this installer-owned marker is safe; application state is separate.
+    replace_json(marker, installed_marker("portable-user", revision, None, repository))
     return {
         "profile": "portable-user",
         "config": str(config_file),
@@ -771,9 +1058,155 @@ def portable_install(
         "release": str(release),
         "start": str(launcher),
         **startup,
+        "command": str(command),
+        "command_on_path": command_on_path(root),
         "hardware_qualified": False,
         "reboot_recommended": False,
     }
+
+
+def portable_update(
+    source: Path, revision: str, host: Host, scratch: Path, args: argparse.Namespace
+) -> dict:
+    """Build the new release beside the running one, switch, verify, or roll back."""
+    root = portable_root(host)
+    marker_file, config_file = root / "install.json", root / "campix.json"
+    marker = read_marker(marker_file)
+    current = marker["revision"]
+    if marker.get("status") != "ready":
+        raise InstallError("A previous update did not finish; run campix repair first.")
+    if revision == current:
+        raise InstallError("This revision is already installed; use campix repair to rebuild it.")
+    config = json.loads(config_file.read_text(encoding="utf-8"))
+    windows = host.system == "windows"
+    ffmpeg, _ = validate_encoder(host)
+    uv = provision_uv(host, scratch / "tools", args.uv)
+    releases = root / "releases"
+    release, old_release = releases / revision, releases / current
+    if release.exists():
+        remove_tree(release)  # Left by an interrupted update; it was never activated.
+    replace_json(marker_file, {**marker, "status": "updating", "target": revision})
+    try:
+        daemon, media, _ = build_release(
+            source, release, uv, ffmpeg, windows, bool(config.get("mediamtx_binary"))
+        )
+    except BaseException:
+        replace_json(marker_file, marker)
+        raise
+    updated = dict(config)
+    if not Path(str(config.get("ffmpeg", ""))).is_file():
+        updated["ffmpeg"] = str(ffmpeg)
+    if media:
+        updated["mediamtx_binary"] = str(media)
+    old_daemon = release_daemon(old_release, windows)
+    stop_portable()
+    # Copy the database only after the old process has really exited.
+    wait_for_free_ports(config)
+    backup = backup_database(root, current)
+    replace_json(config_file, updated)
+    write_launcher(root, daemon, config_file, windows)
+    try:
+        startup = replace_portable(daemon, config_file, release)
+    except (RuntimeError, InstallError) as exc:
+        restore_database(root, backup)
+        replace_json(config_file, config)
+        write_launcher(root, old_daemon, config_file, windows)
+        try:
+            replace_portable(old_daemon, config_file, old_release)
+        except (RuntimeError, InstallError) as again:
+            raise InstallError(
+                "Update failed and the previous version did not restart; run campix repair."
+            ) from again
+        replace_json(marker_file, marker)
+        raise InstallError(
+            f"Update to {revision[:12]} failed; CamPiX {current[:12]} was restored."
+        ) from exc
+    command = install_manager(release, root)
+    replace_json(marker_file, installed_marker("portable-user", revision, current, args.repository))
+    prune_releases(releases, {revision, current})
+    return {
+        "profile": "portable-user",
+        "revision": revision,
+        "previous": current,
+        "backup": str(backup) if backup else None,
+        **startup,
+        "command": str(command),
+    }
+
+
+def portable_repair(
+    source: Path, revision: str, host: Host, scratch: Path, args: argparse.Namespace
+) -> dict:
+    """Rebuild the installed revision in place; configuration and data stay untouched."""
+    root = portable_root(host)
+    marker_file, config_file = root / "install.json", root / "campix.json"
+    marker = read_marker(marker_file)
+    if revision != marker["revision"]:
+        raise InstallError("Repair rebuilds the installed revision only.")
+    config = json.loads(config_file.read_text(encoding="utf-8"))
+    windows = host.system == "windows"
+    ffmpeg, _ = validate_encoder(host)
+    uv = provision_uv(host, scratch / "tools", args.uv)
+    releases = root / "releases"
+    release = releases / revision
+    aside = releases / f".repair-{revision[:12]}-{int(time.time())}"
+    try:
+        stop_portable()
+        wait_for_free_ports(config)
+    except RuntimeError:
+        pass  # A damaged startup definition is replaced below, which checks the ports.
+    if release.exists():
+        # Virtual environments embed their path, so the rebuild uses the original path
+        # and the damaged release waits aside until the rebuilt one is verified.
+        release.rename(aside)
+    try:
+        daemon, media, _ = build_release(
+            source, release, uv, ffmpeg, windows, bool(config.get("mediamtx_binary"))
+        )
+        updated = dict(config)
+        if not Path(str(config.get("ffmpeg", ""))).is_file():
+            updated["ffmpeg"] = str(ffmpeg)
+        if media:
+            updated["mediamtx_binary"] = str(media)
+        replace_json(config_file, updated)
+        write_launcher(root, daemon, config_file, windows)
+        startup = replace_portable(daemon, config_file, release)
+    except BaseException:
+        if release.exists():
+            remove_tree(release)
+        if aside.exists():
+            aside.rename(release)
+        replace_json(config_file, config)
+        raise
+    if aside.exists():
+        remove_tree(aside)
+    command = install_manager(release, root)
+    replace_json(
+        marker_file,
+        installed_marker(
+            "portable-user",
+            revision,
+            marker.get("previous"),
+            marker.get("repository", REPOSITORY),
+        ),
+    )
+    return {"profile": "portable-user", "revision": revision, **startup, "command": str(command)}
+
+
+def apply_to_installation(
+    source: Path, revision: str, host: Host, plan: dict, args: argparse.Namespace
+) -> dict:
+    """Update or repair an existing installation with this source revision."""
+    native = NATIVE_MARKER.is_file()
+    if not native and not (portable_root(host) / "install.json").is_file():
+        raise InstallError("No CamPiX installation was found; run the installer first.")
+    with tempfile.TemporaryDirectory(prefix="campix-install-") as directory:
+        scratch = Path(directory)
+        if native:
+            operation = native_update if args.update else native_repair
+            return operation(source, revision, host, plan, scratch, args)
+        operation = portable_update if args.update else portable_repair
+        return operation(source, revision, host, scratch, args)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -792,28 +1225,45 @@ def main(argv: list[str] | None = None) -> int:
         "--source", type=Path, default=ROOT, help="Clean source checkout to install"
     )
     parser.add_argument("--json", action="store_true", help="Print machine-readable result")
+    # `campix update` and `campix repair` hand over to the fetched revision's installer.
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--update", action="store_true", help=argparse.SUPPRESS)
+    mode.add_argument("--repair", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--repository", default=REPOSITORY, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     host = detect_host()
     plan = install_plan(host, args.without_mediamtx)
     if args.dry_run:
         print(json.dumps(plan, indent=2))
         return 0
+    action = "update" if args.update else "repair" if args.repair else "installation"
     try:
         if plan["problems"]:
             raise InstallError(" ".join(plan["problems"]))
         require_unprivileged(host)
-        if args.non_interactive:
+        if args.non_interactive and not (args.update or args.repair):
             raise InstallError(
                 "A fresh installation requires interactive secure administrator creation; rerun in a terminal."
             )
         source = args.source.resolve()
         revision = source_revision(source)
-        check_ports({"port": 8080, "mediamtx_binary": None if args.without_mediamtx else "enabled"})
         os.umask(0o077)
+        if args.update or args.repair:
+            result = apply_to_installation(source, revision, host, plan, args)
+            if args.json:
+                print(json.dumps(result, indent=2))
+            elif args.update:
+                print(
+                    f"CamPiX updated to {revision[:12]}; the previous release stays for rollback."
+                )
+            else:
+                print(f"CamPiX {revision[:12]} was rebuilt; accounts and media were preserved.")
+            return 0
+        check_ports({"port": 8080, "mediamtx_binary": None if args.without_mediamtx else "enabled"})
         with tempfile.TemporaryDirectory(prefix="campix-install-") as directory:
             scratch = Path(directory)
             if plan["profile"] == "native-debian":
-                result = native_install(source, host, plan, scratch, args)
+                result = native_install(source, revision, host, plan, scratch, args)
             else:
                 result = portable_install(source, revision, host, scratch, args)
         result.update(revision=revision, url="http://127.0.0.1:8080")
@@ -821,8 +1271,11 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(result, indent=2))
         else:
             print(f"CamPiX installed. Configuration: {result['config']}")
-            print(f"Service started. Manual launch after stopping the service: {result['start']}")
             print("Open http://127.0.0.1:8080 locally; use an SSH tunnel for another computer.")
+            print("Manage CamPiX with: campix start | stop | status | update | repair | uninstall")
+            if not result["command_on_path"]:
+                folder = Path(result["command"]).parent
+                print(f"Open a new terminal first, or add {folder} to PATH, to use campix.")
             print("Verify physical cameras and performance on this host before production use.")
             if result["reboot_recommended"]:
                 print("IMX500 firmware was installed; reboot the host before camera validation.")
@@ -831,9 +1284,9 @@ def main(argv: list[str] | None = None) -> int:
         message = (
             str(exc)
             if isinstance(exc, RuntimeError)
-            else "Installation failed while handling local files."
+            else f"The {action} failed while handling local files."
         )
-        print(f"CamPiX installation stopped: {message}", file=sys.stderr)
+        print(f"CamPiX {action} stopped: {message}", file=sys.stderr)
         print(
             "Existing accounts/media are preserved. Inspect the retained deployment before recovery; shared packages are not removed.",
             file=sys.stderr,

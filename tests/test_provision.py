@@ -242,7 +242,7 @@ def test_invalid_password_makes_no_state_changes(tmp_path, monkeypatch):
         lambda **_: pytest.fail("No discovery before admin readiness"),
     )
     with pytest.raises(provision.ProvisionError, match="Invalid username/password"):
-        provision.setup(settings, password_reader=lambda: "short")
+        provision.setup(settings, username="maintainer", password_reader=lambda: "short")
     assert not settings.data_dir.exists()
 
 
@@ -250,7 +250,9 @@ def test_setup_creates_secure_admin_and_multiple_conservative_cameras(tmp_path, 
     settings = Settings(data_dir=tmp_path / "data")
     devices = inventory(device(), device("1", "csi:i2c-camera", "picamera2", "imx708"))
     monkeypatch.setattr(provision, "discover_inventory", lambda **_: devices)
-    result = provision.setup(settings, password_reader=lambda: "test-only-setup-password")
+    result = provision.setup(
+        settings, username="maintainer", password_reader=lambda: "test-only-setup-password"
+    )
     assert result["admin_created"] is True
     assert result["hardware_qualified"] is False
     db = Database(settings.data_dir / "campix.sqlite3")
@@ -384,7 +386,9 @@ def test_setup_rolls_back_admin_and_camera_inserts_on_invalid_inventory(tmp_path
         lambda **_: inventory(device(), device("0", "fake:synthetic", "synthetic")),
     )
     with pytest.raises(provision.ProvisionError, match="unsupported local camera"):
-        provision.setup(settings, password_reader=lambda: "test-only-setup-password")
+        provision.setup(
+            settings, username="maintainer", password_reader=lambda: "test-only-setup-password"
+        )
     db = Database(settings.data_dir / "campix.sqlite3")
     assert db.all("SELECT * FROM users") == []
     assert db.all("SELECT * FROM cameras") == []
@@ -399,10 +403,14 @@ def test_setup_rejects_occupied_admin_name_without_changing_account(tmp_path, mo
     settings = Settings(data_dir=tmp_path / "data")
     settings.prepare()
     db = Database(settings.data_dir / "campix.sqlite3")
-    Auth(db, settings).create_user("admin", "test-only-viewer-password", "viewer")
+    Auth(db, settings).create_user("maintainer", "test-only-viewer-password", "viewer")
     before = snapshot_database(db)
     with pytest.raises(provision.ProvisionError, match="username already exists"):
-        provision.setup(settings, password_reader=lambda: pytest.fail("Must not prompt"))
+        provision.setup(
+            settings,
+            username="maintainer",
+            password_reader=lambda: pytest.fail("Must not prompt"),
+        )
     assert snapshot_database(db) == before
     db.close()
 
@@ -457,3 +465,70 @@ def test_setup_cli_noninteractive_no_admin_fails_without_creating_state(tmp_path
     assert result.returncode == 2
     assert "No enabled administrator" in result.stderr
     assert not data_dir.exists()
+
+
+@pytest.mark.parametrize("name", ["admin", "Administrator", "ROOT"])
+def test_first_admin_rejects_predictable_names_without_state_changes(tmp_path, monkeypatch, name):
+    settings = Settings(data_dir=tmp_path / "untouched")
+    monkeypatch.setattr(
+        provision, "discover_inventory", lambda **_: pytest.fail("No discovery before admin")
+    )
+    with pytest.raises(provision.ProvisionError, match="predictable account name"):
+        provision.setup(
+            settings, username=name, password_reader=lambda: pytest.fail("Must not prompt")
+        )
+    assert not settings.data_dir.exists()
+
+
+def test_first_admin_username_is_read_before_the_password(tmp_path, monkeypatch):
+    settings = Settings(data_dir=tmp_path / "data")
+    monkeypatch.setattr(provision, "discover_inventory", lambda **_: inventory())
+    order = []
+
+    def username():
+        order.append("username")
+        return "camera.keeper"
+
+    def password():
+        order.append("password")
+        return "test-only-setup-password"
+
+    result = provision.setup(settings, username_reader=username, password_reader=password)
+    assert result["admin_created"] is True and order == ["username", "password"]
+    db = Database(settings.data_dir / "campix.sqlite3")
+    try:
+        admin = db.one("SELECT username, role FROM users")
+        assert (admin["username"], admin["role"]) == ("camera.keeper", "admin")
+    finally:
+        db.close()
+
+
+def test_setup_cli_prompts_again_after_typing_mistakes(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(provision, "discover_inventory", lambda **_: inventory())
+    monkeypatch.setattr("sys.stdin", SimpleNamespace(isatty=lambda: True))
+    names = iter(["admin", "bad name", "camera.keeper"])
+    secrets = iter(
+        [
+            "short",
+            "test-only-setup-password",
+            "test-only-typo-password",
+            "test-only-setup-password",
+            "test-only-setup-password",
+        ]
+    )
+    monkeypatch.setattr("builtins.input", lambda prompt: next(names))
+    monkeypatch.setattr(cli.getpass, "getpass", lambda prompt: next(secrets))
+    data = tmp_path / "data"
+    monkeypatch.setattr(sys, "argv", ["campixd", "--data-dir", str(data), "setup"])
+    cli.main()
+    output = capsys.readouterr()
+    assert "Administrator created." in output.out
+    assert "predictable account name" in output.err
+    assert "letters, digits" in output.err
+    assert "12-128 characters" in output.err and "do not match" in output.err
+    assert "test-only" not in output.out + output.err
+    db = Database(data / "campix.sqlite3")
+    try:
+        assert db.one("SELECT username FROM users")["username"] == "camera.keeper"
+    finally:
+        db.close()

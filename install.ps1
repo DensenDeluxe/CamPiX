@@ -103,3 +103,8 @@ if (-not (Test-Path -LiteralPath $installerPath)) {
     throw 'This source revision has no all-in-one installer. Select a published installer revision with CAMPIX_REF.'
 }
 Invoke-Checked $pythonExecutable (@($installerPath) + $installerArgs)
+$commandFolder = Join-Path $env:LOCALAPPDATA 'CamPiX\bin'
+if ((Test-Path -LiteralPath (Join-Path $commandFolder 'campix.cmd')) -and -not (($env:PATH -split ';') -contains $commandFolder)) {
+    # New terminals read the user PATH from the registry; offer campix in this one as well.
+    $env:PATH = "$env:PATH;$commandFolder"
+}
