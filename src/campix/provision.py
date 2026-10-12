@@ -17,7 +17,7 @@ from .config import Settings
 from .db import Database
 from .models import CameraConfig, UserCreate, directshow_source_valid
 from .process_lock import ProcessLock
-from .processes import NO_WINDOW, bounded_output
+from .processes import NO_WINDOW, bounded_output, contain_children
 from .security import HASHER
 
 # QUERYCAP reads driver metadata; it does not allocate buffers or start capture.
@@ -543,6 +543,9 @@ def setup(
 if __name__ == "__main__":
     if len(sys.argv) != 4 or sys.argv[1] != "--inventory-worker":
         raise SystemExit("This module is an internal discovery worker; use campixd setup")
+    # An outer discovery timeout kills this worker abruptly. Its native listing child
+    # must be contained too, including setup runs outside the long-running service.
+    contain_children()
     encoded = json.dumps(local_inventory(ffmpeg=sys.argv[3])).encode("utf-8")
     if len(encoded) > INVENTORY_BYTES:
         raise SystemExit("Inventory exceeds its size limit")

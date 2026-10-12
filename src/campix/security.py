@@ -63,16 +63,28 @@ class Auth:
             valid = False
         if not valid or not row or row["disabled"]:
             raise HTTPException(401, "Invalid username or password")
-        if HASHER.check_needs_rehash(row["password"]):
-            self.db.execute(
-                "UPDATE users SET password=? WHERE id=?", (HASHER.hash(password), row["id"])
-            )
-        token, csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
-        self.db.execute("DELETE FROM sessions WHERE expires < ?", (time.time(),))
-        self.db.execute(
-            "INSERT INTO sessions VALUES (?,?,?,?)",
-            (digest(token), row["id"], csrf, time.time() + self.settings.session_hours * 3600),
+        replacement_hash = (
+            HASHER.hash(password) if HASHER.check_needs_rehash(row["password"]) else None
         )
+        token, csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
+        with self.db.transaction() as conn:
+            # Serialize with account changes from both HTTP handlers and recovery CLI clients.
+            conn.execute("BEGIN IMMEDIATE")
+            current = conn.execute("SELECT * FROM users WHERE id=?", (row["id"],)).fetchone()
+            if not current or any(
+                current[key] != row[key] for key in ("password", "role", "disabled")
+            ):
+                raise HTTPException(401, "Invalid username or password")
+            if replacement_hash is not None:
+                conn.execute(
+                    "UPDATE users SET password=? WHERE id=?", (replacement_hash, row["id"])
+                )
+            now = time.time()
+            conn.execute("DELETE FROM sessions WHERE expires < ?", (now,))
+            conn.execute(
+                "INSERT INTO sessions VALUES (?,?,?,?)",
+                (digest(token), row["id"], csrf, now + self.settings.session_hours * 3600),
+            )
         return token, csrf, {"id": row["id"], "username": row["username"], "role": row["role"]}
 
     def session(self, token):

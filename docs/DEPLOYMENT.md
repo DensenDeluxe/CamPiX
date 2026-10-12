@@ -104,6 +104,8 @@ Portable background startup ignores ambient `CAMPIX_` environment variables. Cha
 
 The Windows task runs the windowless `pythonw.exe`. MediaMTX and FFmpeg children start without console windows and belong to a kill-on-close job, so they end with the service process, including after an abnormal exit. If Windows refuses that job, `service.log` records a warning and the service continues. Installer revision `c396dd0` lacked this behavior: it showed an empty console window titled with the managed `mediamtx.exe` path, and closing that window only restarted MediaMTX. Replace such an installation with a corrected revision instead of closing the window.
 
+Short-lived Windows discovery workers also contain their native listing children. Discovery reports failure if Windows refuses this protection; it does not enumerate devices without child cleanup. Correct the host's process/job restrictions before retrying automatic discovery.
+
 The portable installation also supplies `start-campix` or Windows `start-campix.ps1` for foreground diagnosis. Stop the background service first; two processes must not use the same data directory or capture device. Native services use `sudo systemctl stop campix`, portable Linux uses `systemctl --user stop campix`, macOS uses `launchctl bootout gui/$(id -u)/org.campix.service`, and Windows uses `Stop-ScheduledTask -TaskName CamPiX`. Task cancellation can interrupt recordings; preserve any `.partial` files and follow recovery guidance below.
 
 ## Existing installations and failed attempts
@@ -191,6 +193,10 @@ CAMPIX_MEDIAMTX_HLS_TOKEN=<private secret matching hlsCDNSecret>
 ```
 
 For portable background startup, set `mediamtx_api`, `mediamtx_rtsp`, `mediamtx_token`, and `mediamtx_hls_token` in the installed `campix.json` instead of environment variables, and restart the managed service.
+
+`mediamtx_api` must be an HTTP(S) origin, for example `http://127.0.0.1:9997` or `http://[::1]:9997`. Embedded credentials, API base paths, query strings, fragments, and invalid ports are rejected; keep authentication secrets in the token settings. An empty value disables the external API. The proxy uses the origin's host on port 8888 for HLS and 8889 for WHEP.
+
+The authenticated proxy accepts at most 8 MiB per HLS response and 64 KiB per WHEP response, and limits the entire upstream exchange to 20 seconds. Configure external HLS segment sizes within that bound; the managed segment limit already stays within it. Upstreams must honor `Accept-Encoding: identity`; compressed responses are rejected before decoding to keep the memory bound effective. Oversized responses fail with a conflict and timeouts report media unavailability. Proxy streams are closed after success, failure, or cancellation.
 
 The external server must be in the same host/proxy network; HLS/WHEP HTTP ports are currently 8888/8889. Do not place secrets in Git, shared URLs, or configuration exports. External RTSP publishing also requires matching permissions, such as private network binding and credentials in the server-side RTSP origin. Managed mode does not expose anonymous network streams.
 

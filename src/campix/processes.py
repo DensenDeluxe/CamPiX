@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
-import threading
+import time
+from collections.abc import Callable
 
 # The Windows background service runs under windowless pythonw.exe. Each console child
 # (MediaMTX, FFmpeg) would otherwise open its own visible console window; closing that
@@ -15,35 +17,79 @@ JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
 
 
+def _output_reader(descriptor: int) -> Callable[[int], bytes | None]:
+    """Read available pipe bytes without waiting for a child or inherited writer."""
+    if sys.platform == "win32":
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        peek = kernel32.PeekNamedPipe
+        peek.argtypes = (
+            wintypes.HANDLE,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            ctypes.POINTER(wintypes.DWORD),
+            wintypes.LPVOID,
+        )
+        peek.restype = wintypes.BOOL
+        handle = msvcrt.get_osfhandle(descriptor)
+
+        def read(size: int) -> bytes | None:
+            available = wintypes.DWORD()
+            if not peek(handle, None, 0, None, ctypes.byref(available), None):
+                error = ctypes.get_last_error()
+                if error in {109, 232}:  # ERROR_BROKEN_PIPE, ERROR_NO_DATA
+                    return b""
+                raise ctypes.WinError(error)
+            return os.read(descriptor, min(size, available.value)) if available.value else None
+
+    else:
+        import select
+
+        def read(size: int) -> bytes | None:
+            ready, _, _ = select.select([descriptor], [], [], 0)
+            return os.read(descriptor, size) if ready else None
+
+    return read
+
+
 def bounded_output(command: list[str], *, limit: int, timeout: float) -> bytes:
     """Return a short-lived child's diagnostic output, stopping it on overrun or timeout."""
     output = bytearray()
-    with subprocess.Popen(
+    process = subprocess.Popen(
         command,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
         creationflags=NO_WINDOW,
-    ) as process:
-
-        def collect():
-            while chunk := process.stderr.read(8192):
+    )
+    try:
+        read = _output_reader(process.stderr.fileno())
+        deadline = time.monotonic() + timeout
+        while True:
+            exited = process.poll() is not None
+            chunk = read(min(8192, max(1, limit + 1 - len(output))))
+            if chunk:
                 output.extend(chunk)
                 if len(output) > limit:
-                    process.kill()
-                    return
-
-        reader = threading.Thread(target=collect, daemon=True)
-        reader.start()
+                    raise ValueError("Child process output exceeds its size limit")
+            elif exited:
+                return bytes(output)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(command, timeout)
+            if not chunk:
+                time.sleep(min(0.01, remaining))
+    finally:
         try:
-            process.wait(timeout=timeout)
-        finally:
             if process.poll() is None:
                 process.kill()
-            reader.join(timeout=5)
-    if len(output) > limit:
-        raise ValueError("Child process output exceeds its size limit")
-    return bytes(output)
+            process.wait(timeout=5)
+        finally:
+            process.stderr.close()
 
 
 def contain_children() -> bool:

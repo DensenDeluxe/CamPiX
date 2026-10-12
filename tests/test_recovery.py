@@ -5,6 +5,7 @@ import subprocess
 import sys
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -13,6 +14,7 @@ from campix.app import create_app
 from campix.config import Settings
 from campix.db import Database
 from campix.process_lock import ProcessLock
+from campix.recording import Recorder
 
 from .conftest import signin
 from .test_service import wait_online
@@ -230,6 +232,35 @@ def test_encoder_failure_never_indexes_success(client, application, monkeypatch)
     assert recorder.error is not None
     assert client.get("/api/v1/media").json()["total"] == 0
     assert application.state.db.one("SELECT id FROM events WHERE kind='recording.error'")
+
+
+def test_encoder_failure_without_incoming_frames_is_observed(tmp_path, monkeypatch):
+    spawn = subprocess.Popen
+    monkeypatch.setattr(
+        "campix.recording.subprocess.Popen",
+        lambda *args, **kwargs: spawn([sys.executable, "-c", "raise SystemExit(1)"], **kwargs),
+    )
+    events, saved = [], []
+    store = SimpleNamespace(
+        reserve=lambda extension: ("interrupted", tmp_path / "interrupted.mp4"),
+        bus=SimpleNamespace(publish=lambda *args: events.append(args)),
+        register=lambda *args: saved.append(args),
+    )
+    recorder = Recorder(
+        SimpleNamespace(id="idle", fps=10, preroll_seconds=0, encoder="auto"),
+        SimpleNamespace(ffmpeg="ffmpeg"),
+        store,
+        [],
+    )
+    try:
+        assert recorder.done.wait(3), "Encoder exit was ignored while the frame queue was empty"
+        assert recorder.error is not None
+        assert recorder.proc.poll() is not None
+        assert not saved
+        assert events and events[0][0] == "recording.error"
+    finally:
+        recorder.stop_requested.set()
+        assert recorder.done.wait(3)
 
 
 @pytest.mark.skipif(not shutil.which("ffmpeg"), reason="FFmpeg required")

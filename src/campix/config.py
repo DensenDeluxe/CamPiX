@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class Settings(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
     data_dir: Path = Path(".campix")
     host: str = "127.0.0.1"
     port: int = Field(8080, ge=1, le=65535)
@@ -63,12 +63,34 @@ class Settings(BaseModel):
     @field_validator("mediamtx_api")
     @classmethod
     def media_api(cls, value):
-        if value is not None:
-            from urllib.parse import urlsplit
+        if not value:
+            return None
+        from urllib.parse import urlsplit
 
-            if urlsplit(value).scheme not in {"http", "https"}:
-                raise ValueError("mediamtx_api must be an HTTP(S) URL")
-        return value.rstrip("/") if value else None
+        message = (
+            "mediamtx_api must be an HTTP(S) origin with a valid host and port, without credentials"
+        )
+        try:
+            url = urlsplit(value)
+            port = url.port
+        except ValueError:
+            raise ValueError(message) from None
+        if (
+            url.scheme not in {"http", "https"}
+            or not url.hostname
+            or (port is not None and not 1 <= port <= 65535)
+            or url.path not in {"", "/"}
+            or url.query
+            or url.fragment
+            or url.username is not None
+            or "\\" in value
+            or any(
+                character.isspace() or ord(character) < 32 or ord(character) == 127
+                for character in value
+            )
+        ):
+            raise ValueError(message)
+        return value.rstrip("/")
 
     @classmethod
     def load(cls, file: Path | None = None, **overrides):

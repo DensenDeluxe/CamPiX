@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import secrets
@@ -14,6 +15,9 @@ from .capture import CaptureError, terminate_process
 from .processes import NO_WINDOW
 
 MEDIAMTX_VERSION = "1.21.2"
+HLS_PROXY_MAX_BYTES = 8 * 1024 * 1024  # Matches the managed hlsSegmentMaxSize of 8M.
+WHEP_PROXY_MAX_BYTES = 64 * 1024
+MEDIA_PROXY_TIMEOUT_SECONDS = 20
 
 
 def managed_config():
@@ -123,6 +127,7 @@ class Publisher:
             except (CaptureError, OSError):
                 self.online, self.error = False, "Media publisher disconnected; retrying"
             finally:
+                self.online = False
                 if self.proc:
                     terminate_process(self.proc)
                     if self.proc.stdin and not self.proc.stdin.closed:
@@ -275,13 +280,17 @@ class MediaPlane:
         if protocol == "hls" and not re.fullmatch(r"[a-zA-Z0-9_-]+\.(m3u8|mp4|m4s|ts)", path):
             raise CaptureError("Only HLS playlists and segments are exposed")
         url = urlsplit(self.api)
-        origin = f"{url.scheme}://{url.hostname}:{8889 if protocol == 'webrtc' else 8888}"
+        host = f"[{url.hostname}]" if ":" in url.hostname else url.hostname
+        origin = f"{url.scheme}://{host}:{8889 if protocol == 'webrtc' else 8888}"
         upstream = f"{origin}/{camera_id}/{path}"
         headers = {
             key: value
             for key, value in request.headers.items()
             if key.lower() in {"content-type", "if-match", "range"}
         }
+        # Compressed responses could allocate an oversized decoded chunk before its
+        # length can be checked. Media upstreams must honor this identity request.
+        headers["accept-encoding"] = "identity"
         if self.settings.mediamtx_token:
             headers["authorization"] = "Bearer " + self.settings.mediamtx_token
         if protocol == "hls":
@@ -295,28 +304,47 @@ class MediaPlane:
             for key, value in request.query_params.items()
             if key in {"_HLS_msn", "_HLS_part", "_HLS_skip"} and len(value) <= 32
         }
-        async with httpx.AsyncClient(timeout=20, follow_redirects=False, trust_env=False) as client:
-            response = await client.request(
-                request.method,
-                upstream,
-                params=params,
-                headers=headers,
-                content=await request.body(),
-            )
+        limit = HLS_PROXY_MAX_BYTES if protocol == "hls" else WHEP_PROXY_MAX_BYTES
+        content = bytearray()
+        try:
+            # HTTPX's I/O timeout resets whenever bytes arrive; also bound the entire
+            # exchange so a peer cannot keep a request alive with a slow trickle.
+            async with asyncio.timeout(MEDIA_PROXY_TIMEOUT_SECONDS):
+                async with httpx.AsyncClient(
+                    timeout=MEDIA_PROXY_TIMEOUT_SECONDS, follow_redirects=False, trust_env=False
+                ) as client:
+                    async with client.stream(
+                        request.method,
+                        upstream,
+                        params=params,
+                        headers=headers,
+                        content=await request.body() if request.method != "GET" else None,
+                    ) as response:
+                        if response.headers.get("content-encoding", "identity").lower() != "identity":
+                            raise CaptureError("MediaMTX response uses unsupported content encoding")
+                        async for chunk in response.aiter_bytes():
+                            if len(content) + len(chunk) > limit:
+                                raise CaptureError("MediaMTX response exceeds its size limit")
+                            content.extend(chunk)
+        except TimeoutError:
+            raise httpx.ReadTimeout("MediaMTX exchange exceeded its time limit") from None
         result_headers = {
             key: value
             for key, value in response.headers.items()
             if key.lower() in {"content-type", "etag", "accept-ranges", "content-range"}
         }
         if "location" in response.headers and protocol == "webrtc":
-            location = urlsplit(response.headers["location"]).path
+            try:
+                location = urlsplit(response.headers["location"]).path
+            except ValueError:
+                raise CaptureError("Unexpected media session location") from None
             suffix = location.removeprefix("/" + camera_id + "/")
-            if not suffix.startswith("whep"):
+            if not re.fullmatch(r"whep/[a-fA-F0-9-]{1,64}", suffix):
                 raise CaptureError("Unexpected media session location")
             result_headers["location"] = f"/api/v1/streams/{camera_id}/webrtc/{suffix}"
         elif 300 <= response.status_code < 400:
             raise CaptureError("Unexpected media redirect; check the MediaMTX configuration")
-        return response.status_code, response.content, result_headers
+        return response.status_code, bytes(content), result_headers
 
     def stop(self):
         self.halt.set()

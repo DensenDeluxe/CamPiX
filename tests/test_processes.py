@@ -3,6 +3,7 @@ import logging
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,6 +17,69 @@ from campix.security import Auth
 
 SOURCE = Path(__file__).resolve().parents[1] / "src" / "campix"
 LAUNCHERS = {"Popen", "run", "call", "check_call", "check_output"}
+
+
+def test_bounded_output_preserves_binary_stderr_and_discards_stdout():
+    command = [
+        sys.executable,
+        "-c",
+        "import sys; sys.stdout.buffer.write(b'ignored'); sys.stderr.buffer.write(b'\\x00\\xff')",
+    ]
+    assert processes.bounded_output(command, limit=2, timeout=5) == b"\x00\xff"
+
+
+def test_bounded_output_stops_on_small_overrun_before_timeout(tmp_path):
+    pid_path = tmp_path / "child.pid"
+    command = [
+        sys.executable,
+        "-c",
+        "import os, pathlib, sys, time; "
+        "pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); "
+        "sys.stderr.buffer.write(b'x' * 1024); sys.stderr.flush(); time.sleep(30)",
+        str(pid_path),
+    ]
+    with pytest.raises(ValueError, match="output exceeds"):
+        processes.bounded_output(command, limit=512, timeout=2)
+    assert not psutil.pid_exists(int(pid_path.read_text()))
+
+
+def test_bounded_output_timeout_reaps_the_child(tmp_path):
+    pid_path = tmp_path / "child.pid"
+    command = [
+        sys.executable,
+        "-c",
+        "import os, pathlib, sys, time; "
+        "pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(30)",
+        str(pid_path),
+    ]
+    with pytest.raises(subprocess.TimeoutExpired):
+        processes.bounded_output(command, limit=512, timeout=0.5)
+    assert not psutil.pid_exists(int(pid_path.read_text()))
+
+
+def test_bounded_output_does_not_wait_for_an_inherited_stderr_pipe(tmp_path):
+    pid_path = tmp_path / "grandchild.pid"
+    command = [
+        sys.executable,
+        "-c",
+        "import pathlib, subprocess, sys; "
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(3)']); "
+        "pathlib.Path(sys.argv[1]).write_text(str(child.pid)); "
+        "sys.stderr.buffer.write(b'done'); sys.stderr.flush()",
+        str(pid_path),
+    ]
+    started = time.monotonic()
+    try:
+        assert processes.bounded_output(command, limit=512, timeout=1) == b"done"
+        assert time.monotonic() - started < 1.5
+    finally:
+        if pid_path.exists():
+            try:
+                child = psutil.Process(int(pid_path.read_text()))
+                child.kill()
+                child.wait(timeout=5)
+            except psutil.NoSuchProcess:
+                pass
 
 
 def test_every_service_child_process_starts_without_a_console_window():

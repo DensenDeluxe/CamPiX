@@ -58,6 +58,8 @@ class Camera:
                 while not self.halt.is_set():
                     started = time.monotonic()
                     image = backend.read()
+                    if self.halt.is_set():
+                        break
                     if image.size != (self.config.width, self.config.height):
                         image = image.resize((self.config.width, self.config.height))
                     preview = io.BytesIO()
@@ -158,8 +160,9 @@ class Camera:
                                     self.recorder.deadline = now + self.config.motion_postroll
                             active_frames = 0
                     previous = gray
-                else:
+                elif not self.config.motion_enabled or gray is None:
                     previous = None
+                    active_frames = 0
                 with self.operation_lock:
                     recorder = self.recorder
                     if recorder and (
@@ -345,6 +348,14 @@ class CameraManager:
         with self.lock:
             return [camera.info() for camera in self.cameras.values()]
 
+    def _stop_for_update(self, camera):
+        camera.stop()
+        if camera.capture_thread.is_alive() or camera.motion_thread.is_alive():
+            message = "Camera worker did not stop; retry after the driver releases the device"
+            camera.status, camera.error = "error", message
+            self.bus.publish("camera.stop_failed", message, camera.config.id)
+            raise CaptureError(message)
+
     def save(self, config):
         with self.lock:
             if config.backend == "synthetic" and not self.settings.demo:
@@ -371,7 +382,7 @@ class CameraManager:
                 # high CPU cost without adding detail. The running profile stays untouched.
                 if same_device and modes and f"{config.width}x{config.height}" not in modes:
                     raise CaptureError("This camera captures only " + ", ".join(modes))
-                previous.stop()
+                self._stop_for_update(previous)
             self.db.execute(
                 "INSERT INTO cameras VALUES (?,?) ON CONFLICT(id) DO UPDATE SET config=excluded.config",
                 (config.id, config.model_dump_json()),
@@ -387,7 +398,7 @@ class CameraManager:
             camera = self.get(camera_id)
             if camera.info()["recording"]:
                 raise CaptureError("Stop recording before removing a camera")
-            camera.stop()
+            self._stop_for_update(camera)
             del self.cameras[camera_id]
             self.db.execute("DELETE FROM cameras WHERE id=?", (camera_id,))
             self.db.execute(
@@ -396,12 +407,13 @@ class CameraManager:
             self.bus.publish("camera.removed", "Camera removed", camera_id)
 
     def controls(self, camera_id, values):
-        camera = self.get(camera_id)
-        camera.apply_controls(values)
-        self.db.execute(
-            "UPDATE cameras SET config=? WHERE id=?", (camera.config.model_dump_json(), camera_id)
-        )
-        return camera.info()
+        with self.lock:
+            camera = self.get(camera_id)
+            camera.apply_controls(values)
+            self.db.execute(
+                "UPDATE cameras SET config=? WHERE id=?", (camera.config.model_dump_json(), camera_id)
+            )
+            return camera.info()
 
     def stop(self):
         for camera in list(self.cameras.values()):

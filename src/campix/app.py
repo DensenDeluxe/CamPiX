@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import Field
@@ -178,6 +179,112 @@ def create_app(settings: Settings | None = None):
         return dependency
 
     viewer, operator, admin = role(), role("operator"), role("admin")
+
+    validation_locations = {
+        "body",
+        "query",
+        "path",
+        "header",
+        "cookie",
+        "float",
+        "int",
+        "bool",
+        "str",
+        "cmd",
+        "limit",
+        "offset",
+        "kind",
+        "download",
+        "user_id",
+        "media_id",
+        "job_id",
+        "schedule_id",
+        "protocol",
+    } | {
+        field
+        for model in (
+            CameraConfig,
+            CameraPatch,
+            ControlPatch,
+            Login,
+            RecordingRequest,
+            Schedule,
+            TimelapseRequest,
+            UserCreate,
+            MediaLock,
+            UserPatch,
+            StorageSettings,
+        )
+        for field in model.model_fields
+    }
+    validator_messages = {
+        f"Value error, {message}": f"Value error, {message}"
+        for message in (
+            "Picamera2 source must be a camera index",
+            "V4L2 source must be /dev/videoN",
+            "DirectShow source must be a device name without quotes, colons, or control characters",
+            "Network source must be an RTSP or HTTP(S) camera URL",
+            "GStreamer vendor pipelines require an installed adapter; arbitrary pipelines are disabled",
+            "Legacy source must be an absolute preview JPEG path",
+            "Unsupported or non-finite control",
+            "Each snapshot may be selected once",
+            "days must contain distinct weekday numbers 0–6",
+            "Unknown IANA timezone",
+        )
+    }
+
+    @app.exception_handler(RequestValidationError)
+    async def invalid_request(request, exc):
+        # Inputs, mapping keys and custom validator messages can contain passwords or URLs.
+        messages = {
+            "missing": "Field required",
+            "extra_forbidden": "Extra inputs are not permitted",
+            "string_type": "Input should be a string",
+            "string_too_short": "String is shorter than the allowed length",
+            "string_too_long": "String exceeds the allowed length",
+            "string_pattern_mismatch": "String does not match the required format",
+            "bool_type": "Input should be a boolean",
+            "bool_parsing": "Input should be a valid boolean",
+            "int_type": "Input should be an integer",
+            "int_parsing": "Input should be a valid integer",
+            "int_from_float": "Input should be an integer without a fractional part",
+            "float_type": "Input should be a number",
+            "float_parsing": "Input should be a valid number",
+            "finite_number": "Input should be a finite number",
+            "greater_than": "Input is below the allowed range",
+            "greater_than_equal": "Input is below the allowed range",
+            "less_than": "Input exceeds the allowed range",
+            "less_than_equal": "Input exceeds the allowed range",
+            "multiple_of": "Input is not an allowed multiple",
+            "literal_error": "Input is not an allowed value",
+            "list_type": "Input should be a list",
+            "dict_type": "Input should be a dictionary",
+            "too_short": "Input contains fewer items than allowed",
+            "too_long": "Input contains more items than allowed",
+            "json_invalid": "Malformed JSON",
+        }
+        return JSONResponse(
+            {
+                "detail": [
+                    {
+                        "type": error["type"],
+                        "loc": [
+                            part
+                            if isinstance(part, int) or part in validation_locations
+                            else "[redacted]"
+                            for part in error["loc"]
+                        ],
+                        "msg": (
+                            validator_messages.get(error.get("msg"), "Invalid value")
+                            if error["type"] == "value_error"
+                            else messages.get(error["type"], "Invalid value")
+                        ),
+                    }
+                    for error in exc.errors()
+                ]
+            },
+            status_code=422,
+        )
 
     @app.exception_handler(KeyError)
     async def missing(request, exc):

@@ -126,6 +126,34 @@ On the ACER FHD User Facing webcam, in a windowless service:
 
 A forced driver stall, disconnect recovery on real hardware, and the rebuilt task installation are not recorded here.
 
+## Deep debugging and failure/recovery verification — 12 October 2026
+
+This pass examined the existing service, process management, media paths, authentication, persistence, installer, and browser workflows. The initial Windows baseline recorded 188 passes and 2 skips. The final Python suite contains 66 additional cases, including reproduced failure paths and negative security cases; a green baseline alone did not reveal these defects.
+
+Confirmed corrections:
+
+- HTTP validation and configuration exceptions no longer echo credential inputs. Fixed model-validation guidance remains available, and arbitrary mapping keys and validator text are redacted.
+- Login atomically rechecks the verified account before inserting a session, including against a separate SQLite connection used for password recovery. Pending logins and rehashes cannot undo password or role changes or session revocation.
+- Camera profile replacement/removal refuses to relinquish ownership while an old worker remains alive. Retry succeeds after the driver releases it. Controls cannot overwrite a newer profile, and shutdown discards delayed frames.
+- Motion analysis retains its previous frame between polls, including at low capture frame rates. Idle recording workers detect encoder exit without reporting successful media.
+- Diagnostic output overruns terminate promptly, and inherited pipe writers cannot prolong cleanup. Windows discovery children end with their abruptly terminated worker; containment refusal prevents enumeration.
+- Publisher shutdown clears its online state. IPv6 media origins work, configuration origins and WHEP session locations are validated, and malformed locations produce sanitized errors.
+- Media proxy responses have size and total-time bounds, release their streams after cancellation/failure, omit GET bodies, and reject compressed upstream bodies before decoding.
+
+Final local evidence:
+
+| Environment                        | Result                 | Explicit skips                                                                                                     |
+| ---------------------------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| Windows / Python 3.11.9            | 254 passed, 2 skipped  | Managed MediaMTX integration not configured; POSIX-only containment case.                                          |
+| Ubuntu 24.04 / WSL / Python 3.12.3 | 242 passed, 14 skipped | Eight Windows-only cases, five FFmpeg integration cases (Linux FFmpeg unavailable), and one managed MediaMTX case. |
+| Real Chromium browser              | 5 passed, 1 skipped    | Optional real WebRTC/HLS MediaMTX integration not configured.                                                      |
+
+The running host deployment owned the fixed MediaMTX loopback ports. It was not stopped or altered to make optional integration tests run; the local binary's presence does not establish a fresh media-plane integration result. Browser checks preserved the existing DirectShow error-guidance assertion while verifying authentication, recording/playback, media management, schedules, mobile layout, localization, and downloads.
+
+`uv lock --check`, JavaScript syntax, documentation links, formatting, and Ruff 0.17.0 passed. A wheel was built, compared against the current Python sources, installed into an isolated environment using hash-verified `requirements.lock`, and passed the packaged-assets/authentication/JPEG smoke check. An amd64 Debian package was built with Python 3.12 in isolated WSL tooling and passed the extracted-package smoke check. The package checks emitted the existing Starlette TestClient deprecation warning; dependency versions were not changed.
+
+There is no schema or dependency migration. Existing media and database state remain compatible. Configurations with media API base paths, embedded credentials, or invalid origins must use a valid origin and separate token settings; external upstreams must honor identity encoding and the documented response limits. Source rollback does not require a database downgrade. No commit, publication, deployed-service replacement, new vulnerability audit, OCI build, target-native Raspberry Pi run, or physical-camera/disconnect/soak qualification was performed in this pass.
+
 ## Remaining production gates
 
 1. Test at least Pi 4/CM4 and Pi 5/CM5 on their target operating systems with official and relevant Arducam/third-party sensors. Qualify UVC devices and at least one RTSP camera separately. Device discovery is not full functional certification.

@@ -8,11 +8,15 @@ CamPiX does not replace a hardened operating system. Administrators define camer
 
 - No default accounts or passwords; local bootstrap requires a password of at least twelve characters.
 - Argon2id password hashes, random HttpOnly/SameSite=Strict session cookies, and hashed session IDs in SQLite. Expiry, logout, account disabling, and role/password changes revoke access.
+- Login rechecks the verified account inside a write transaction before creating a session. Concurrent password, role, or disabled-state changes reject the pending login; stale rehashes cannot restore a replaced password.
 - Viewers can view and download. Operators can also apply controls, record, lock/delete media, and export. Administrators can additionally manage cameras, schedules, users, and storage rules. The API prevents removing or demoting the last active administrator.
 - CSRF tokens plus Origin/Fetch-Site checks protect writes, including logout, camera commands, and WHEP session management. WebSockets require a valid session and matching origin.
 - Login limits by IP and username, write limits by user, bounded input models, and a 64 KiB maximum request body. API, OpenAPI, media, and metrics are not anonymously accessible.
+- HTTP 422 validation responses expose only error types, vetted field locations, and fixed English messages. Submitted values, validator context, arbitrary mapping keys, and arbitrary exception text are withheld because they can contain credentials. Known fixed model-validation guidance remains available.
+- Configuration validation hides submitted values in exception text, including rejected media origins and token settings, so terminal errors do not echo those credentials.
 - A Content Security Policy without inline JavaScript/CSS, framing restrictions, `nosniff`, a restrictive referrer policy, and secure cookies/HSTS in the TLS profile. Forwarded headers are accepted only from explicitly trusted loopback proxies.
 - Parameterized SQL, normalized media paths, no shell execution of camera sources or macros, no arbitrary GStreamer pipelines, fixed media-proxy targets, and restricted protocol paths.
+- Media proxy responses are limited to 8 MiB for HLS and 64 KiB for WHEP, with a 20-second total upstream deadline. WHEP session locations must match the same restricted session paths accepted for subsequent requests.
 - Private data files and secrets excluded from configuration exports. Network-source credentials still necessarily exist in the private database and local FFmpeg decoder process arguments.
 - One active service per data directory, child-process cleanup on shutdown, bounded recording/pre-roll/export/event queues, and a storage reserve.
 

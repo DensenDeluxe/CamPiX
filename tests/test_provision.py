@@ -1,5 +1,7 @@
 import errno
 import json
+import os
+import runpy
 import sqlite3
 import struct
 import subprocess
@@ -7,6 +9,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import psutil
 import pytest
 
 from campix import cli, provision
@@ -191,6 +194,77 @@ def test_discovery_timeout_returns_diagnostic_and_removes_private_staging(monkey
     assert result["devices"] == []
     assert result["diagnostics"][0]["code"] == "discovery-timeout"
     assert not Path(output_paths[0]).parent.exists()
+
+
+def test_discovery_worker_refuses_native_enumeration_without_child_containment(
+    tmp_path, monkeypatch
+):
+    output = tmp_path / "inventory.json"
+    calls = []
+
+    def refused():
+        calls.append("contain")
+        raise OSError("test-only child containment refusal")
+
+    def forbid_enumeration(frame, event, arg):
+        if event == "call" and frame.f_code.co_name == "local_inventory":
+            pytest.fail("Native discovery ran without child containment")
+        return forbid_enumeration
+
+    monkeypatch.setattr("campix.processes.contain_children", refused)
+    monkeypatch.setattr(sys, "argv", ["campix.provision", "--inventory-worker", str(output), "unused"])
+    previous_trace = sys.gettrace()
+    try:
+        sys.settrace(forbid_enumeration)
+        with pytest.warns(RuntimeWarning, match="found in sys.modules"), pytest.raises(
+            OSError, match="child containment refusal"
+        ):
+            runpy.run_module("campix.provision", run_name="__main__")
+    finally:
+        sys.settrace(previous_trace)
+    assert calls == ["contain"]
+    assert not output.exists()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows discovery child containment")
+def test_terminated_discovery_worker_stops_its_native_listing_child(tmp_path):
+    worker = (
+        "import runpy, subprocess, sys, time\n"
+        "from campix.processes import NO_WINDOW\n"
+        "def stall_native_listing(frame, event, arg):\n"
+        "    if event == 'call' and frame.f_code.co_name == 'local_inventory':\n"
+        "        sys.settrace(None)\n"
+        "        child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'],\n"
+        "                                 creationflags=NO_WINDOW)\n"
+        "        print(child.pid, flush=True)\n"
+        "        time.sleep(30)\n"
+        "    return stall_native_listing\n"
+        "sys.argv = ['campix.provision', '--inventory-worker', sys.argv[1], 'unused']\n"
+        "sys.settrace(stall_native_listing)\n"
+        "runpy.run_module('campix.provision', run_name='__main__')\n"
+    )
+    # Stall the real worker at the native inventory boundary, without opening hardware.
+    process = subprocess.Popen(
+        [sys.executable, "-c", worker, str(tmp_path / "inventory.json")],
+        env={**os.environ, "PYTHONPATH": os.pathsep.join(path for path in sys.path if path)},
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        text=True,
+        creationflags=provision.NO_WINDOW,
+    )
+    try:
+        child = psutil.Process(int(process.stdout.readline()))
+    finally:
+        # subprocess.run uses the same abrupt termination on discovery timeout.
+        process.kill()
+        process.wait(timeout=5)
+        process.stdout.close()
+    try:
+        child.wait(timeout=1)
+    except psutil.TimeoutExpired:
+        child.kill()
+        child.wait(timeout=5)
+        pytest.fail("A native listing child outlived its terminated discovery worker")
 
 
 def test_discovery_rejects_unbounded_worker_result(monkeypatch):

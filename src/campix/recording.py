@@ -105,6 +105,8 @@ class Recorder:
     def _write(self):
         try:
             while not self.stop_requested.is_set() or not self.queue.empty():
+                if self.proc.poll() is not None:
+                    raise RuntimeError("Encoder exited before recording was stopped")
                 try:
                     frame = self.queue.get(timeout=0.2)
                 except queue.Empty:

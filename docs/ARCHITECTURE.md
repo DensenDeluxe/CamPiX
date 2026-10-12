@@ -28,6 +28,12 @@ campixd (one process per data directory)
 
 Capture, motion analysis, and recording run outside HTTP request handling. A failed camera is reopened with bounded retry backoff. Recorders and publishers have independent FFmpeg processes; a slow encoder does not block the capture thread. The recorder drops and reports excess frames instead of consuming unbounded memory. Pre-roll and recording queues are each limited to 32 MiB per camera.
 
+Motion analysis retains the last analyzed image between polls, including when capture delivers fewer than five frames per second. Recording workers check encoder exit even when no new frames arrive, so an encoder failure reaches a terminal error instead of leaving an idle recording active.
+
+Profile replacement and removal wait for the old camera workers to stop. If a driver remains blocked after the shutdown timeout, the API reports a conflict and retains the profile and worker ownership; retry once the driver releases the device. Control changes and profile updates share the manager lock so an old control operation cannot overwrite a newer saved profile. A frame returned after shutdown begins is discarded.
+
+Short-lived diagnostic processes read only available pipe bytes and enforce an output limit and deadline. An inherited pipe writer cannot keep cleanup waiting after the direct child exits. Windows discovery workers contain their native listing children so an outer discovery timeout also terminates those children.
+
 The current portable pipeline decodes frames and re-encodes them. `auto` means **libx264 software encoding**, not automatic native hardware acceleration. `h264_v4l2m2m` can be selected explicitly but remains unverified without hardware-in-the-loop evidence. Direct Picamera2 H.264, compressed UVC passthrough, DMABUF/zero-copy, and a shared live-view/recording encoder are not implemented. This matters particularly on smaller Raspberry Pis.
 
 ## Capabilities, not assumed compatibility
