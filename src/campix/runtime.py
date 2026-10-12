@@ -66,6 +66,9 @@ class Camera:
                     image.save(preview, "JPEG", quality=self.config.quality)
                     jpeg = preview.getvalue()
                     now = time.monotonic()
+                    frame_time = getattr(backend, "frame_received_at", now)
+                    if now - frame_time > 5:
+                        raise CaptureError("Capture processing cannot keep up with the live source")
                     # Analysis works on a small grayscale copy, outside the capture worker.
                     gray = np.array(image.resize((160, 90)).convert("L"))
                     with self.condition:
@@ -79,9 +82,9 @@ class Camera:
                             )
                         self.jpeg = jpeg
                         self.sequence += 1
-                        self.frame_times.append(now)
+                        self.frame_times.append(frame_time)
                         self.analysis, self.analysis_sequence = gray, self.sequence
-                        self.preroll.append((now, jpeg))
+                        self.preroll.append((frame_time, jpeg))
                         self.preroll_bytes += len(jpeg)
                         while self.preroll and (
                             now - self.preroll[0][0] > self.config.preroll_seconds
@@ -267,6 +270,7 @@ class Camera:
                 "frame_age_seconds": round(frame_age, 2) if frame_age is not None else None,
                 "recording": bool(recorder and not recorder.done.is_set()),
                 "dropped_frames": recorder.dropped if recorder else 0,
+                "capture_dropped_frames": getattr(self.backend, "dropped_frames", 0),
                 "preroll_bytes": self.preroll_bytes,
                 "motion_enabled": self.config.motion_enabled,
                 "motion_threshold": self.config.motion_threshold,

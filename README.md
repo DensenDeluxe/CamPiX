@@ -28,7 +28,7 @@ The familiar camera-appliance workflow should not depend on an obsolete camera s
 - **Camera management:** multiple profiles and controls discovered from the selected adapter, rather than invented hardware support.
 - **Schedules:** persistent interval jobs with time windows, weekdays, and time zones.
 - **Authenticated control plane:** FastAPI, REST/OpenAPI, WebSocket events, SQLite, system metrics, Argon2id passwords, viewer/operator/admin roles, CSRF protection, and revocable sessions.
-- **Optional media server:** supervised, version-pinned MediaMTX for RTSP publishing and authenticated WebRTC/HLS access, with MJPEG fallback.
+- **Optional media server:** supervised, version-pinned MediaMTX for RTSP publishing and authenticated WebRTC/HLS access, with a latest-frame JPEG fallback.
 - **Web interface:** responsive desktop and mobile layouts, dark/light themes, English/German localization, and the supplied CamPiX branding. No frontend build or external CDN is required.
 
 Actual application screenshot from the Chromium workflow tests, using explicit synthetic input on Windows and the English interface. This demonstrates the UI, not physical-camera qualification.
@@ -84,7 +84,9 @@ The portable recording pipeline decodes and re-encodes frames. Encoder selection
 
 ## Live streaming
 
-MJPEG works through the authenticated application without MediaMTX. Optional MediaMTX v1.21.2 adds RTSP publishing, WebRTC/WHEP, and HLS. The managed server is loopback-only; remote WebRTC needs a separately secured MediaMTX deployment with reachable ICE addresses and, where required, TURN. HLS currently uses native browser support, with MJPEG fallback elsewhere.
+The browser can display current JPEG frames through the authenticated application without MediaMTX. It requests one frame at a time and cancels pending work when the camera, view, or tab changes. This prevents multipart browser buffering from replaying an old live view. The authenticated `/stream.mjpg` endpoint remains available for other clients.
+
+Optional MediaMTX v1.21.2 adds RTSP publishing, WebRTC/WHEP, and HLS. Automatic mode prefers WebRTC; the live publisher uses wall-clock timestamps when frames are skipped. The managed server is loopback-only; remote WebRTC needs a separately secured MediaMTX deployment with reachable ICE addresses and, where required, TURN. HLS currently uses native browser support, with latest-frame JPEG fallback elsewhere. See the [latency and recovery behavior](docs/DEPLOYMENT.md#live-view-latency-and-recovery) for overload and connection limits.
 
 See [MediaMTX setup](docs/DEPLOYMENT.md#optional-mediamtx) before exposing any media ports. A running HTTP health check does not prove that a camera or streaming path is ready.
 

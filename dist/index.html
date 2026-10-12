@@ -191,8 +191,12 @@
                   ></label>
                   <div class="panel-header-actions">
                     <select id="transport-select" aria-label="Transport">
-                      <option value="auto">WebRTC → MJPEG</option>
-                      <option value="mjpeg">MJPEG</option>
+                      <option value="auto" data-i18n="autoLive">
+                        WebRTC → JPEG · Live
+                      </option>
+                      <option value="mjpeg" data-i18n="jpegLive">
+                        JPEG · Live
+                      </option>
                       <option value="hls">HLS</option></select
                     ><button
                       class="round-control"
@@ -211,7 +215,12 @@
                     playsinline
                     hidden
                   ></video>
-                  <div class="empty-state" id="live-empty">
+                  <div
+                    class="empty-state"
+                    id="live-empty"
+                    role="status"
+                    aria-live="polite"
+                  >
                     <img src="./assets/campix-icon.svg" alt="" />
                     <p data-i18n="noCamera">
                       Füge eine Kamera hinzu, um das Livebild zu starten.

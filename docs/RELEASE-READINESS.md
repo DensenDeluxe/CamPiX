@@ -154,6 +154,35 @@ The running host deployment owned the fixed MediaMTX loopback ports. It was not 
 
 There is no schema or dependency migration. Existing media and database state remain compatible. Configurations with media API base paths, embedded credentials, or invalid origins must use a valid origin and separate token settings; external upstreams must honor identity encoding and the documented response limits. Source rollback does not require a database downgrade. No commit, publication, deployed-service replacement, new vulnerability audit, OCI build, target-native Raspberry Pi run, or physical-camera/disconnect/soak qualification was performed in this pass.
 
+## DirectShow live latency correction — 12 October 2026
+
+The reported symptom was a webcam live view that could fall minutes behind. Three software causes were reproduced: synchronous FIFO pipe consumption blocked behind image processing, FFmpeg's `fps` filter/output synchronization duplicated images across timestamp gaps, and the live publisher assigned frame-count timestamps even when actual capture ran slower. Two generated images 120 seconds apart produced 1,200 output JPEGs before the correction. Small timestamp jitter also reduced sampling cadence.
+
+DirectShow now drains raw JPEG bytes independently into one latest-frame slot, samples clock buckets with a 5 ms boundary tolerance, and uses output passthrough/packet flushing. It does not invent higher native FPS or replay timestamp gaps. Cancelled discovery, initial-frame waiting, and mode retries cannot reopen a closed device. The complete-frame watchdog, bounded partial buffer, worker cleanup, overwritten-frame counter, and receipt-based frame age have regression coverage. The live publisher uses wall-clock variable-rate timing and immediate frame flushing; recording/timelapse frame-count timing is unchanged.
+
+The browser's JPEG fallback makes one authenticated fetch/decode at a time, cancels stale generations, and shows connection/recovery status. It clears LIVE before switching from failed WebRTC and until a JPEG decodes. Tests cover stalled network requests, both stalled decoding stages, late image completion, camera changes, hidden tabs, logout/session expiry, and recovery. Browser test contexts reuse validated, test-only sessions per role so additional cases respect the existing login rate limit; production limits are unchanged.
+
+Final checks:
+
+| Environment                                              | Result                 | Explicit skips                                                                                                            |
+| -------------------------------------------------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| Windows / Python 3.11.9 / FFmpeg 8.1.1 / MediaMTX 1.21.2 | 278 passed, 1 skipped  | POSIX-only containment case.                                                                                              |
+| Ubuntu 24.04 / WSL / Python 3.12.3                       | 256 passed, 23 skipped | Eight Windows-only cases, fourteen FFmpeg cases because Linux FFmpeg was unavailable, and one unconfigured MediaMTX case. |
+| Installed Chrome / real MediaMTX                         | 12 passed              | None; actual WebRTC frames and authenticated HLS were tested.                                                             |
+
+Python and browser managed-media checks ran sequentially. Lock consistency, Ruff 0.17.0, JavaScript syntax, documentation links, and formatting passed. A wheel containing the current Python/web sources passed isolated installed-package assets/authentication/JPEG checks with hash-verified runtime dependencies. An amd64 Debian build and extracted-package smoke check also passed in WSL. No dependency locks or database schema changed.
+
+A separate short physical check used the ACER FHD User Facing webcam on Windows build 10.0.26300, Python 3.11.9, and FFmpeg 8.1.1. Frames remained only in memory. The consumer intentionally paused 350 ms between images; pipe-reader skipping kept its handoff current:
+
+| Profile                 | Duration | Observed pipe FPS | Consumer FPS | Overwritten JPEGs | Receipt-to-decode age, median / maximum | FFmpeg CPU share of host |
+| ----------------------- | -------- | ----------------- | ------------ | ----------------- | --------------------------------------- | ------------------------ |
+| 1280×720, target 10 FPS | 4.01 s   | 9.96              | 2.74         | 28                | 62 / 109 ms                             | 0.79%                    |
+| 1280×720, target 30 FPS | 4.30 s   | 16.76             | 2.79         | 59                | 31.5 / 63 ms                            | 0.50%                    |
+
+These ages start when a complete JPEG reaches CamPiX, not when the sensor exposes an image; they are not sensor-to-screen measurements. The 30 FPS profile did not deliver 30 FPS in this short check. Owned FFmpeg processes and reader/watch workers ended after each profile. No disconnect, long soak, other-camera, target Raspberry Pi, deployed browser latency, or hardware encoder qualification is inferred.
+
+The installed release was not replaced, and no commit or publication was performed. The checkout correction and packaged artifact still require an explicit deployment update to affect that separate installation. No data migration is needed; rollback restores the previous source release and its former latency behavior.
+
 ## Remaining production gates
 
 1. Test at least Pi 4/CM4 and Pi 5/CM5 on their target operating systems with official and relevant Arducam/third-party sensors. Qualify UVC devices and at least one RTSP camera separately. Device discovery is not full functional certification.

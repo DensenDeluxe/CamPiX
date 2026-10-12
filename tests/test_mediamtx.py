@@ -2,7 +2,10 @@ import asyncio
 import gzip
 import io
 import os
+import shutil
 import socket
+import subprocess
+import sys
 import threading
 import time
 from types import SimpleNamespace
@@ -10,6 +13,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from PIL import Image
 from starlette.requests import Request
 
 from campix.app import create_app
@@ -75,6 +79,195 @@ def test_publisher_shutdown_clears_online_state(monkeypatch):
     publisher._run()
     assert publisher.proc.stdin.closed
     assert publisher.online is False
+
+
+def test_publisher_flushes_each_new_frame_and_skips_timeout_duplicates(monkeypatch):
+    publisher = Publisher.__new__(Publisher)
+    publisher.halt = threading.Event()
+    publisher.settings = Settings()
+    publisher.online, publisher.error = False, None
+    events = []
+
+    class Pipe(io.BytesIO):
+        def write(self, data):
+            events.append(("write", data))
+            return super().write(data)
+
+        def flush(self):
+            events.append(("flush", None))
+            return super().flush()
+
+    frames = iter(((1, b"first"), (1, b"first"), (3, b"latest")))
+
+    def frame(sequence, timeout):
+        try:
+            return next(frames)
+        except StopIteration:
+            publisher.halt.set()
+            return 4, b"stopped"
+
+    publisher.camera = SimpleNamespace(
+        config=SimpleNamespace(id="demo", encoder="auto", fps=10), frame=frame
+    )
+    pipe = Pipe()
+    monkeypatch.setattr(
+        "campix.mediamtx.subprocess.Popen",
+        lambda *args, **kwargs: SimpleNamespace(stdin=pipe),
+    )
+    monkeypatch.setattr("campix.mediamtx.terminate_process", lambda process: None)
+    publisher._run()
+    assert events == [("write", b"first"), ("flush", None), ("write", b"latest"), ("flush", None)]
+    assert pipe.closed and publisher.online is False
+
+
+def test_publisher_recovers_a_failed_flush_with_a_new_process(monkeypatch):
+    publisher = Publisher.__new__(Publisher)
+    publisher.halt = threading.Event()
+    publisher.settings = Settings()
+    publisher.online, publisher.error = False, None
+    processes, backoffs, written = [], [], []
+
+    class Pipe(io.BytesIO):
+        def flush(self):
+            if len(processes) == 1:
+                raise BrokenPipeError("private-upstream-token")
+            written.append(self.getvalue())
+            return super().flush()
+
+    def launch(*args, **kwargs):
+        process = SimpleNamespace(stdin=Pipe())
+        processes.append(process)
+        return process
+
+    def frame(sequence, timeout):
+        if written:
+            publisher.halt.set()
+        return sequence + 1, b"latest"
+
+    def wait(timeout):
+        backoffs.append(timeout)
+        return publisher.halt.is_set()
+
+    publisher.camera = SimpleNamespace(
+        config=SimpleNamespace(id="demo", encoder="auto", fps=10), frame=frame
+    )
+    monkeypatch.setattr(publisher.halt, "wait", wait)
+    monkeypatch.setattr("campix.mediamtx.subprocess.Popen", launch)
+    monkeypatch.setattr("campix.mediamtx.terminate_process", lambda process: None)
+    publisher._run()
+    assert len(processes) == 2 and all(process.stdin.closed for process in processes)
+    assert written == [b"latest"] and backoffs == [3, 3]
+    assert publisher.error is None and publisher.online is False
+
+
+def test_publisher_shutdown_unblocks_a_stalled_encoder_pipe(monkeypatch):
+    original_popen = subprocess.Popen
+    writing = threading.Event()
+
+    def stalled_encoder(command, **kwargs):
+        process = original_popen([sys.executable, "-c", "import time; time.sleep(30)"], **kwargs)
+        stdin = process.stdin
+
+        class Pipe:
+            def write(self, data):
+                writing.set()
+                return stdin.write(data)
+
+            def flush(self):
+                return stdin.flush()
+
+            @property
+            def closed(self):
+                return stdin.closed
+
+            def close(self):
+                stdin.close()
+
+        process.stdin = Pipe()
+        return process
+
+    camera = SimpleNamespace(
+        config=SimpleNamespace(id="stall-test", encoder="auto", fps=10),
+        frame=lambda sequence, timeout: (sequence + 1, b"jpeg" * 256 * 1024),
+    )
+    monkeypatch.setattr("campix.mediamtx.subprocess.Popen", stalled_encoder)
+    publisher = Publisher(camera, Settings())
+    try:
+        assert writing.wait(5), "The publisher did not attempt to send a frame"
+    finally:
+        publisher.stop()
+    assert publisher.proc.poll() is not None
+    assert not publisher.thread.is_alive()
+    assert publisher.proc.stdin.closed and publisher.online is False
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="FFmpeg required")
+def test_live_publisher_starts_promptly_and_preserves_elapsed_time_with_slow_frames(monkeypatch):
+    publisher = Publisher.__new__(Publisher)
+    publisher.halt = threading.Event()
+    publisher.settings = Settings()
+    publisher.online, publisher.error = False, None
+    jpeg = io.BytesIO()
+    Image.effect_noise((256, 144), 32).convert("RGB").save(jpeg, "JPEG", quality=85)
+    sample = jpeg.getvalue()
+    assert len(sample) > 4096  # Avoid tiny-frame buffering affecting the timing measurement.
+    received, readers = [], []
+    original_popen = subprocess.Popen
+    started = time.monotonic()
+
+    def local_output(command, **kwargs):
+        # Exercise the actual publisher encoder/timestamps without a server or fixed ports.
+        output = max(index for index, value in enumerate(command) if value == "-f")
+        command = [*command[:output], "-f", "framecrc", "pipe:1"]
+        process = original_popen(command, **{**kwargs, "stdout": subprocess.PIPE})
+
+        def read_packets():
+            with process.stdout:
+                for line in process.stdout:
+                    if not line.startswith(b"#"):
+                        received.append(
+                            (
+                                time.monotonic() - started,
+                                int(line.split(b",")[2]),
+                                b"F=0x0" not in line,
+                            )
+                        )
+
+        reader = threading.Thread(target=read_packets, daemon=True)
+        readers.append(reader)
+        reader.start()
+        return process
+
+    delivered = []
+
+    def frame(sequence, timeout):
+        if len(delivered) == 12:
+            publisher.halt.set()
+            return sequence, sample
+        publisher.halt.wait(0.2)  # Actual input rate is half the configured encoder rate.
+        delivered.append(time.monotonic())
+        return len(delivered), sample
+
+    publisher.camera = SimpleNamespace(
+        config=SimpleNamespace(id="latency-test", encoder="auto", fps=10), frame=frame
+    )
+    monkeypatch.setattr("campix.mediamtx.subprocess.Popen", local_output)
+    try:
+        publisher._run()
+    finally:
+        publisher.halt.set()
+        for reader in readers:
+            reader.join(timeout=5)
+    assert publisher.proc.poll() is not None
+    assert readers and all(not reader.is_alive() for reader in readers)
+    assert received, "The publisher buffered every live frame until shutdown"
+    assert received[0][0] < 1.5, received
+    elapsed = delivered[-1] - delivered[0]
+    timestamp_span = (received[-1][1] - received[0][1]) / publisher.camera.config.fps
+    assert timestamp_span >= elapsed - 0.6, (elapsed, timestamp_span)
+    keyframes = [packet[1] / publisher.camera.config.fps for packet in received if packet[2]]
+    assert len(keyframes) >= 2, keyframes
+    assert keyframes[1] - keyframes[0] <= 1.2, keyframes
 
 
 def proxy_request(method="GET", body=b""):

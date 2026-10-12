@@ -5,7 +5,7 @@
 This document describes the implemented 0.2.0 service. The [research report](deep-research-report.md) describes a broader target architecture; it must not be read as a statement that every proposed component exists.
 
 ```text
-Browser — REST / WebSocket / MJPEG / WHEP / HLS
+Browser — REST / WebSocket / current JPEG / WHEP / HLS
    │ Session + CSRF + roles
    ▼
 campixd (one process per data directory)
@@ -27,6 +27,10 @@ campixd (one process per data directory)
 ## Worker and encoding boundaries
 
 Capture, motion analysis, and recording run outside HTTP request handling. A failed camera is reopened with bounded retry backoff. Recorders and publishers have independent FFmpeg processes; a slow encoder does not block the capture thread. The recorder drops and reports excess frames instead of consuming unbounded memory. Pre-roll and recording queues are each limited to 32 MiB per camera.
+
+DirectShow has a separate raw-JPEG pipe reader and one pending complete frame. It continuously drains FFmpeg while image processing takes the latest frame, discarding overwritten images rather than replaying a FIFO backlog. Timestamp-based sampling reduces work before scaling; output passthrough prevents FFmpeg from inventing frames across clock gaps or above the native source rate. A watchdog requires complete frames, and permanent cancellation prevents mode retries from reopening a closed device. Capture frame age retains the pipe receipt time through processing; `capture_dropped_frames` counts overwritten JPEGs separately from recording drops. Pipe receipt age is not a measurement of sensor-to-screen latency.
+
+The live RTSP publisher bounds known-codec probing, flushes each input frame, and assigns wall-clock timestamps with variable frame-rate output. It requests keyframes at one-second clock intervals when frames are available. Recording and timelapse timing remain separate and retain their frame-count behavior.
 
 Motion analysis retains the last analyzed image between polls, including when capture delivers fewer than five frames per second. Recording workers check encoder exit even when no new frames arrive, so an encoder failure reaches a terminal error instead of leaving an idle recording active.
 
@@ -52,7 +56,7 @@ SQLite access is protected by transactions and thread synchronization. Schema 1 
 
 Optional managed MediaMTX is pinned to v1.21.2 and binds API, RTSP, HLS, WebRTC, and ICE to loopback only. RTMP, SRT, and MoQ are disabled. CamPiX proxies authenticated reads; publishing stays internal. A private HLS CDN secret prevents browser media access from bypassing CamPiX authentication. Secrets and network-camera URLs are excluded from configuration exports.
 
-LAN/WAN WebRTC requires an external, secured MediaMTX installation with reachable ICE/TURN addresses. The managed loopback server alone is not a WAN configuration. The frontend currently plays HLS only when the browser supports it natively; other browsers fall back to MJPEG.
+LAN/WAN WebRTC requires an external, secured MediaMTX installation with reachable ICE/TURN addresses. The managed loopback server alone is not a WAN configuration. The frontend currently plays HLS only when the browser supports it natively; other browsers fall back to authenticated current-JPEG requests. The fallback has one fetch/decode in flight, a 2.5-second overall deadline, and a retry delay. Navigation, camera changes, visibility changes, and logout cancel pending work and release Blob URLs. LIVE appears only after decoding an image; failures clear it. The multipart MJPEG endpoint remains available for compatibility clients.
 
 ## Deliberate differences from the research report
 

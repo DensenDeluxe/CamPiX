@@ -1,5 +1,6 @@
 import io
 import json
+import queue
 import subprocess
 import sys
 import threading
@@ -422,11 +423,14 @@ def test_source_mode_prefers_native_then_the_smallest_covering_mode():
 
 
 def test_directshow_backend_requests_a_native_mode_and_reduces_the_rate_first(monkeypatch):
-    launched = launch(monkeypatch, jpeg() * 2)
+    process = LiveFFmpeg()
+    launched = launch(monkeypatch, process)
     backend = capture.make_backend(camera(), "ffmpeg")
     backend.open()
     try:
-        assert [backend.read().size, backend.read().size] == [(640, 480), (640, 480)]
+        for _ in range(2):
+            process.stdout.feed([jpeg()])
+            assert backend.read().size == (640, 480)
     finally:
         backend.close()
     assert len(launched) == 1
@@ -437,7 +441,11 @@ def test_directshow_backend_requests_a_native_mode_and_reduces_the_rate_first(mo
     # Webcams with fixed frame-rate lists reject other rates; the filter reduces it
     # before any scaling, so FFmpeg scales 10 rather than 30 frames per second.
     assert "-framerate" not in command
-    assert command[command.index("-vf") + 1].startswith("fps=10,scale=640:480")
+    sampling = command[command.index("-vf") + 1]
+    assert sampling.startswith("select=") and "floor((t+0.005)*10)" in sampling
+    assert sampling.index("select=") < sampling.index("scale=640:480")
+    assert command[command.index("-fps_mode") + 1] == "passthrough"
+    assert command[command.index("-flush_packets") + 1] == "1"
     assert command[command.index("-q:v") + 1] == "3"
     assert kwargs["creationflags"] == NO_WINDOW and "shell" not in kwargs
     assert backend.capabilities["model"] == "DirectShow camera"
@@ -465,7 +473,7 @@ def test_unknown_modes_try_the_profile_size_then_the_default_mode(monkeypatch):
     native, fallback = (command for command, _ in launched)
     assert "-video_size" in native and "-video_size" not in fallback
     video_filter = fallback[fallback.index("-vf") + 1]
-    assert video_filter.startswith("fps=10,")
+    assert video_filter.startswith("select=") and "floor((t+0.005)*10)" in video_filter
     assert "force_original_aspect_ratio=decrease" in video_filter
     assert "pad=640:480" in video_filter
     assert backend.capabilities["modes"] == []
@@ -507,6 +515,180 @@ def test_network_frames_cross_the_pipe_nearly_lossless(monkeypatch):
     backend.close()
     command = launched[0][0]
     assert command[command.index("-q:v") + 1] == "3"
+
+
+class LivePipe:
+    """A live producer independent of the camera's image-processing consumer."""
+
+    def __init__(self):
+        self.chunks = queue.Queue()
+        self.drained = threading.Event()
+        self.expected = 0
+        self.delivered = 0
+
+    def feed(self, frames):
+        self.drained.clear()
+        self.expected += len(frames)
+        for frame in frames:
+            self.chunks.put(frame)
+
+    def read(self, size):
+        if self.expected and self.delivered == self.expected:
+            self.drained.set()
+        chunk = self.chunks.get(timeout=5)
+        self.delivered += bool(chunk)
+        return chunk
+
+    read1 = read
+
+    def close(self):
+        pass
+
+
+class LiveFFmpeg(FakeFFmpeg):
+    def __init__(self):
+        super().__init__(b"")
+        self.stdout = LivePipe()
+
+    def terminate(self):
+        self.returncode = 1
+        self.stdout.chunks.put(b"")
+
+    kill = terminate
+
+
+def gray_jpeg(level):
+    buffer = io.BytesIO()
+    Image.new("RGB", (640, 480), (level, level, level)).save(buffer, "JPEG")
+    return buffer.getvalue()
+
+
+def test_directshow_drains_backlog_and_decodes_only_the_newest_frame(monkeypatch):
+    process = LiveFFmpeg()
+    launch(monkeypatch, process)
+    backend = capture.make_backend(camera(), "ffmpeg")
+    backend.open()
+    try:
+        process.stdout.feed([gray_jpeg(level) for level in range(20, 181, 20)])
+        assert process.stdout.drained.wait(2), "Capture pipe was left blocked behind its consumer"
+        image = backend.read()
+        assert image.getpixel((0, 0))[0] == pytest.approx(180, abs=2)
+        assert backend.dropped_frames == 8
+        assert backend.latest_jpeg is None
+    finally:
+        backend.close()
+    assert not backend.reader_thread.is_alive()
+
+
+def test_directshow_close_unblocks_waiting_consumer_and_reader(monkeypatch):
+    process = LiveFFmpeg()
+    launch(monkeypatch, process)
+    backend = capture.make_backend(camera(), "ffmpeg")
+    backend.open()
+    errors = []
+
+    def read():
+        try:
+            backend.read()
+        except capture.CaptureError as exc:
+            errors.append(exc)
+
+    consumer = threading.Thread(target=read)
+    consumer.start()
+    try:
+        backend.close()
+        consumer.join(timeout=2)
+        assert not consumer.is_alive()
+        assert not backend.reader_thread.is_alive()
+        assert errors
+        assert process.poll() is not None
+    finally:
+        process.terminate()
+        consumer.join(timeout=2)
+
+
+def test_directshow_consumer_waits_for_a_new_frame_instead_of_repeating(monkeypatch):
+    process = LiveFFmpeg()
+    launch(monkeypatch, process)
+    backend = capture.make_backend(camera(), "ffmpeg")
+    backend.open()
+    images = []
+    received = threading.Event()
+
+    def read():
+        images.append(backend.read())
+        received.set()
+
+    try:
+        process.stdout.feed([gray_jpeg(40)])
+        assert backend.read().getpixel((0, 0))[0] == pytest.approx(40, abs=2)
+        consumer = threading.Thread(target=read)
+        consumer.start()
+        assert not received.wait(0.1)
+        process.stdout.feed([gray_jpeg(180)])
+        assert received.wait(2)
+        consumer.join(timeout=2)
+        assert images[0].getpixel((0, 0))[0] == pytest.approx(180, abs=2)
+    finally:
+        backend.close()
+
+
+def test_directshow_watchdog_requires_complete_frames_not_trickling_bytes(monkeypatch):
+    monkeypatch.setattr(capture.DirectShowBackend, "stall_seconds", 0.2)
+    process = LiveFFmpeg()
+    launch(monkeypatch, process)
+    backend = capture.make_backend(camera(), "ffmpeg")
+    backend.open()
+    finished = threading.Event()
+
+    def trickle():
+        for _ in range(40):
+            if finished.wait(0.05):
+                return
+            process.stdout.feed([b"incomplete frame"])
+
+    producer = threading.Thread(target=trickle)
+    started = time.monotonic()
+    producer.start()
+    try:
+        with pytest.raises(capture.CaptureError, match="unavailable"):
+            backend.read()
+        assert time.monotonic() - started < 1.3
+        assert process.poll() is not None
+    finally:
+        finished.set()
+        producer.join(timeout=2)
+        backend.close()
+    assert not backend.reader_thread.is_alive()
+
+
+def test_directshow_oversized_partial_frame_is_bounded_and_reported(monkeypatch):
+    process = LiveFFmpeg()
+    launch(monkeypatch, process)
+    backend = capture.make_backend(camera(), "ffmpeg")
+    backend.open()
+    try:
+        process.stdout.feed([b"x" * (16 * 1024 * 1024 + 1)])
+        with pytest.raises(capture.CaptureError, match="frame exceeds the supported size"):
+            backend.read()
+        assert backend.latest_jpeg is None
+    finally:
+        backend.close()
+    assert not backend.reader_thread.is_alive()
+
+
+def test_directshow_watchdog_handles_a_process_exiting_before_kill():
+    backend = capture.make_backend(camera(), "ffmpeg")
+    backend.last_frame = time.monotonic() - backend.stall_seconds - 1
+    process = FakeFFmpeg(b"")
+
+    def exited():
+        process.returncode = 1
+        raise ProcessLookupError("Process already exited")
+
+    process.kill = exited
+    backend._watch(process, threading.Event())
+    assert process.poll() is not None
 
 
 class ModeReportingBackend(capture.Backend):

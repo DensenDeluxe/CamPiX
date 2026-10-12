@@ -22,6 +22,7 @@
     toastTimer: null,
     refreshTimer: null,
     streamGeneration: 0,
+    preview: null,
     dirtyControls: false,
     cameraDirty: false,
     storageDirty: false,
@@ -53,6 +54,13 @@
       "Füge eine Kamera hinzu, um das Livebild zu starten.",
       "Add a camera to start the live view.",
     ],
+    liveConnecting: ["Livebild wird verbunden …", "Connecting live view …"],
+    liveUnavailable: [
+      "Kein aktuelles Livebild. Verbindung wird erneut versucht …",
+      "No current live frame. Retrying connection …",
+    ],
+    jpegLive: ["JPEG · Live", "JPEG · Live"],
+    autoLive: ["WebRTC → JPEG · Live", "WebRTC → JPEG · Live"],
     capture: ["◎ Foto", "◎ Photo"],
     startRecording: ["Aufnehmen", "Record"],
     stopRecording: ["Aufnahme beenden", "Stop recording"],
@@ -145,8 +153,8 @@
     ],
     removeCamera: ["Kamera entfernen", "Remove camera"],
     noHls: [
-      "HLS wird nicht nativ unterstützt; MJPEG wird verwendet.",
-      "HLS is not supported natively; using MJPEG.",
+      "HLS wird nicht nativ unterstützt; JPEG-Livebild wird verwendet.",
+      "HLS is not supported natively; using live JPEG.",
     ],
     timelapseHint: [
       "Alle Fotos der aktuellen Medienseite in zeitlicher Reihenfolge als Video exportieren?",
@@ -458,14 +466,15 @@
     ).toFixed(2);
     $("#focus-output").textContent = Number($("#focus-range").value).toFixed(1);
   }
-  function stopStream() {
-    s.streamGeneration++;
-    $("#live-image").removeAttribute("src");
-    $("#live-image").hidden = true;
-    $("#live-video").pause();
-    $("#live-video").removeAttribute("src");
-    $("#live-video").srcObject = null;
-    $("#live-video").hidden = true;
+  function stopPreview() {
+    if (!s.preview) return;
+    s.preview.request?.abort();
+    clearTimeout(s.preview.timer);
+    if (s.preview.url) URL.revokeObjectURL(s.preview.url);
+    if (s.preview.pendingUrl) URL.revokeObjectURL(s.preview.pendingUrl);
+    s.preview = null;
+  }
+  function closePeer() {
     if (s.peer) s.peer.close();
     s.peer = null;
     if (s.whep && s.csrf)
@@ -474,17 +483,142 @@
         headers: { "X-CSRF-Token": s.csrf },
       }).catch(() => {});
     s.whep = null;
+  }
+  function liveMessage(key) {
+    const message = $("#live-empty p");
+    message.dataset.i18n = key;
+    message.textContent = t(key);
+    $("#live-empty").hidden = false;
+  }
+  function decodePreview(image, signal) {
+    return new Promise((resolve, reject) => {
+      const finish = (handler, value) => {
+        signal.removeEventListener("abort", abort);
+        handler(value);
+      };
+      const abort = () => {
+        image.removeAttribute("src");
+        finish(reject, new DOMException("Live frame cancelled", "AbortError"));
+      };
+      if (signal.aborted) return abort();
+      signal.addEventListener("abort", abort, { once: true });
+      image.decode().then(
+        () => finish(resolve),
+        (error) => finish(reject, error),
+      );
+    });
+  }
+  function stopStream() {
+    s.streamGeneration++;
+    stopPreview();
+    $("#live-image").removeAttribute("src");
+    $("#live-image").hidden = true;
+    $("#live-video").pause();
+    $("#live-video").removeAttribute("src");
+    $("#live-video").srcObject = null;
+    $("#live-video").hidden = true;
+    closePeer();
     $("#live-badge").hidden = true;
   }
-  function mjpeg(gen) {
-    if (gen !== s.streamGeneration || !active()) return;
-    $("#live-empty").hidden = true;
+  function jpegPreview(gen) {
+    if (
+      gen !== s.streamGeneration ||
+      !s.user ||
+      s.view !== "overview" ||
+      document.hidden ||
+      active()?.status !== "online" ||
+      s.preview?.generation === gen
+    )
+      return;
+    closePeer();
+    $("#live-badge").hidden = true;
+    $("#live-image").removeAttribute("src");
+    $("#live-image").hidden = true;
+    $("#live-video").pause();
+    $("#live-video").removeAttribute("src");
+    $("#live-video").srcObject = null;
     $("#live-video").hidden = true;
-    $("#live-image").hidden = false;
-    $("#live-image").src =
-      `/api/v1/cameras/${encodeURIComponent(s.selected)}/stream.mjpg`;
-    $("#actual-transport").textContent = "MJPEG";
-    $("#live-badge").hidden = false;
+    $("#actual-transport").textContent = "JPEG";
+    liveMessage("liveConnecting");
+    const camera = s.selected;
+    const preview = {
+      generation: gen,
+      request: null,
+      timer: null,
+      url: null,
+      pendingUrl: null,
+    };
+    s.preview = preview;
+    const current = () => gen === s.streamGeneration && s.preview === preview;
+    async function next() {
+      if (!current()) return;
+      const started = performance.now();
+      const controller = new AbortController();
+      preview.request = controller;
+      const timeout = setTimeout(() => controller.abort(), 2500);
+      let url;
+      let ready = false;
+      try {
+        // Request the current frame only after the preceding frame is decoded.
+        // Multipart image buffering cannot be bounded by the browser UI.
+        const response = await fetch(
+          `/api/v1/cameras/${encodeURIComponent(camera)}/preview.jpg`,
+          {
+            credentials: "same-origin",
+            cache: "no-store",
+            signal: controller.signal,
+          },
+        );
+        if (!current()) return;
+        if (response.status === 401) {
+          showLogin();
+          return;
+        }
+        if (!response.ok) throw new Error("Live frame unavailable");
+        url = URL.createObjectURL(await response.blob());
+        preview.pendingUrl = url;
+        const image = new Image();
+        image.src = url;
+        await decodePreview(image, controller.signal);
+        if (!current()) return;
+        if (controller.signal.aborted) throw new Error("Live frame timed out");
+        const displayed = $("#live-image");
+        displayed.src = url;
+        await decodePreview(displayed, controller.signal);
+        if (!current()) return;
+        if (controller.signal.aborted) throw new Error("Live frame timed out");
+        const previous = preview.url;
+        preview.url = url;
+        url = null;
+        if (previous) URL.revokeObjectURL(previous);
+        displayed.hidden = false;
+        $("#live-empty").hidden = true;
+        $("#live-badge").hidden = false;
+        ready = true;
+      } catch (_) {
+        if (!current()) return;
+        $("#live-image").removeAttribute("src");
+        $("#live-image").hidden = true;
+        if (preview.url) URL.revokeObjectURL(preview.url);
+        preview.url = null;
+        $("#live-badge").hidden = true;
+        liveMessage("liveUnavailable");
+      } finally {
+        clearTimeout(timeout);
+        if (url) URL.revokeObjectURL(url);
+        preview.pendingUrl = null;
+        if (current()) {
+          preview.request = null;
+          const interval =
+            1000 / Math.max(1, Math.min(30, active().fps_target));
+          preview.timer = setTimeout(
+            next,
+            ready ? Math.max(0, interval - (performance.now() - started)) : 500,
+          );
+        }
+      }
+    }
+    next();
   }
   async function startStream() {
     stopStream();
@@ -495,7 +629,7 @@
       document.hidden ||
       active()?.status !== "online"
     ) {
-      $("#live-empty").hidden = false;
+      liveMessage("noCamera");
       return;
     }
     const mode = $("#transport-select").value;
@@ -507,7 +641,7 @@
         $("#actual-transport").textContent = "HLS";
         $("#live-video")
           .play()
-          .catch(() => mjpeg(gen));
+          .catch(() => jpegPreview(gen));
         return;
       }
       toast(t("noHls"));
@@ -517,7 +651,7 @@
       !s.system.media_plane.configured ||
       !window.RTCPeerConnection
     ) {
-      mjpeg(gen);
+      jpegPreview(gen);
       return;
     }
     let peer;
@@ -581,12 +715,12 @@
       peer.onconnectionstatechange = () => {
         if (["failed", "disconnected"].includes(peer.connectionState)) {
           peer.close();
-          mjpeg(gen);
+          jpegPreview(gen);
         }
       };
     } catch (_) {
       if (peer) peer.close();
-      mjpeg(gen);
+      jpegPreview(gen);
     }
   }
   function mediaCard(item, compact = false) {
@@ -937,10 +1071,13 @@
   });
   $("#transport-select").addEventListener("change", startStream);
   $("#live-image").addEventListener("error", () => {
+    if (!s.preview) return;
     $("#live-badge").hidden = true;
-    $("#live-empty").hidden = false;
+    liveMessage("liveUnavailable");
   });
-  $("#live-video").addEventListener("error", () => mjpeg(s.streamGeneration));
+  $("#live-video").addEventListener("error", () =>
+    jpegPreview(s.streamGeneration),
+  );
   $("#fullscreen-button").addEventListener("click", () =>
     act(async () => {
       if (document.fullscreenElement) await document.exitFullscreen();

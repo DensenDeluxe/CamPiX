@@ -1,5 +1,6 @@
 import json
 import threading
+import time
 
 import numpy as np
 import pytest
@@ -152,3 +153,25 @@ def test_motion_retains_the_previous_frame_when_capture_is_slower_than_analysis(
     camera.halt = AnalysisTicks()
     camera._motion()
     assert recordings == [{"trigger": "motion", "duration": config.motion_postroll}]
+
+
+@pytest.mark.parametrize("age,sequence", [(2, 1), (6, 0)])
+def test_capture_age_preserves_pipe_receipt_time_after_processing(manager, monkeypatch, age, sequence):
+    config = CameraConfig(id="aged", name="Aged frame", backend="synthetic", width=160, height=120)
+    camera = runtime.Camera(config, manager.settings, None, Bus(), {"encoders": []})
+
+    class ReceivedFrame(Backend):
+        def read(self):
+            self.frame_received_at = time.monotonic() - age
+            return Image.new("RGB", (160, 120))
+
+    backend = ReceivedFrame(config)
+    monkeypatch.setattr(runtime, "make_backend", lambda config, ffmpeg: backend)
+    monkeypatch.setattr(camera.bus, "publish", lambda *args: camera.halt.set())
+    camera._capture()
+    assert camera.sequence == sequence
+    if sequence:
+        assert time.monotonic() - camera.frame_times[-1] >= age
+    else:
+        assert not camera.frame_times and camera.jpeg is None
+        assert camera.error == "Capture unavailable (CaptureError); retrying"

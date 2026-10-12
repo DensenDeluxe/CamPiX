@@ -80,12 +80,21 @@ class Publisher:
                     "-hide_banner",
                     "-loglevel",
                     "error",
+                    # This pipe has a known codec; probing a live frame backlog delays startup.
+                    "-probesize",
+                    "32",
+                    "-analyzeduration",
+                    "0",
                     "-f",
                     "image2pipe",
                     "-framerate",
                     str(cfg.fps),
                     "-c:v",
                     "mjpeg",
+                    # Latest-frame consumers may skip frames or run below the target rate.
+                    # Frame-count timestamps would fall progressively behind the live clock.
+                    "-use_wallclock_as_timestamps",
+                    "1",
                     "-i",
                     "pipe:0",
                     "-an",
@@ -106,6 +115,12 @@ class Publisher:
                     "yuv420p",
                     "-g",
                     str(cfg.fps),
+                    "-force_key_frames",
+                    "expr:gte(t,n_forced*1)",
+                    "-fps_mode",
+                    "vfr",
+                    "-flush_packets",
+                    "1",
                     "-f",
                     "rtsp",
                     "-rtsp_transport",
@@ -121,8 +136,14 @@ class Publisher:
                 )
                 sequence = -1
                 while not self.halt.is_set():
-                    sequence, jpeg = self.camera.frame(sequence, timeout=3)
+                    current, jpeg = self.camera.frame(sequence, timeout=3)
+                    if self.halt.is_set():
+                        break
+                    if current == sequence:
+                        continue
+                    sequence = current
                     self.proc.stdin.write(jpeg)
+                    self.proc.stdin.flush()
                     self.online, self.error = True, None
             except (CaptureError, OSError):
                 self.online, self.error = False, "Media publisher disconnected; retrying"

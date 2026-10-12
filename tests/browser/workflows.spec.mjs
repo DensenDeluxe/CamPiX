@@ -1,13 +1,37 @@
 import { test, expect } from "@playwright/test";
 
+// Reuse test-only sessions across fresh browser contexts without exhausting login limits.
+const sessionCookies = new Map();
+
 async function signin(page, role = "admin") {
+  let cookies = sessionCookies.get(role);
+  if (cookies) {
+    await page.context().addCookies(cookies);
+    const session = await page.request.get("/api/v1/auth/me");
+    if (session.ok()) expect((await session.json()).user.role).toBe(role);
+    else {
+      sessionCookies.delete(role);
+      await page.context().clearCookies();
+      cookies = null;
+    }
+  }
   await page.goto("/");
-  await page.locator("#login-form [name=username]").fill(role);
-  await page
-    .locator("#login-form [name=password]")
-    .fill(`test-only-${role}-password`);
-  await page.locator("#login-form button").click();
+  if (!cookies) {
+    await expect(page.locator("#login-screen")).toBeVisible();
+    await page.locator("#login-form [name=username]").fill(role);
+    await page
+      .locator("#login-form [name=password]")
+      .fill(`test-only-${role}-password`);
+    await page.locator("#login-form button").click();
+  }
   await expect(page.locator("#workspace")).toBeVisible();
+  if (!cookies) {
+    cookies = (await page.context().cookies()).filter(
+      (cookie) => cookie.name === "campix_session",
+    );
+    expect(cookies).toHaveLength(1);
+    sessionCookies.set(role, cookies);
+  }
   await expect(page.locator("#camera-count")).toHaveText("1 / 1");
   await page.locator("#transport-select").selectOption("mjpeg");
 }
@@ -85,6 +109,239 @@ test("DirectShow webcams are offered and unsafe device names are rejected", asyn
   );
   await expect(page.locator("#camera-count")).toHaveText("1 / 1");
 });
+
+test("live JPEG preview stays bounded and cancels pending frames when leaving", async ({
+  page,
+}) => {
+  await signin(page);
+  await page.locator(".nav-item[data-view=media]").click();
+  const jpeg = await (
+    await page.request.get("/api/v1/cameras/demo/preview.jpg")
+  ).body();
+  let requests = 0;
+  let aborted = 0;
+  const releases = [];
+  page.on("requestfailed", (request) => {
+    if (request.url().endsWith("/preview.jpg")) aborted++;
+  });
+  await page.route("**/api/v1/cameras/demo/preview.jpg", async (route) => {
+    requests++;
+    await new Promise((resolve) => releases.push(resolve));
+    await route
+      .fulfill({ contentType: "image/jpeg", body: jpeg })
+      .catch(() => {});
+  });
+  await page.locator(".nav-item[data-view=overview]").click();
+  await expect.poll(() => requests).toBe(1);
+  await expect(page.locator("#live-badge")).toBeHidden();
+  await page.waitForTimeout(350);
+  expect(requests).toBe(1);
+  releases[0]();
+  await expect(page.locator("#live-badge")).toBeVisible();
+  await expect
+    .poll(() =>
+      page.locator("#live-image").evaluate((image) => image.naturalWidth),
+    )
+    .toBe(640);
+  await expect(page.locator("#live-image")).toHaveAttribute("src", /^blob:/);
+  await expect.poll(() => requests).toBe(2);
+  await page.locator(".nav-item[data-view=media]").click();
+  await expect.poll(() => aborted).toBe(1);
+  await expect(page.locator("#live-image")).not.toHaveAttribute("src");
+  releases[1]();
+  await page.waitForTimeout(200);
+  expect(requests).toBe(2);
+  await expect(page.locator("#live-badge")).toBeHidden();
+  await page.locator(".nav-item[data-view=overview]").click();
+  await expect.poll(() => requests).toBe(3);
+  releases[2]();
+  await expect(page.locator("#live-badge")).toBeVisible();
+  await page.locator(".nav-item[data-view=media]").click();
+  releases.forEach((release) => release());
+});
+
+test("live JPEG preview rejects expired sessions and clears the displayed frame", async ({
+  page,
+}) => {
+  await signin(page);
+  await page.locator(".nav-item[data-view=media]").click();
+  await page.route("**/api/v1/cameras/demo/preview.jpg", (route) =>
+    route.fulfill({ status: 401, json: { detail: "Authentication required" } }),
+  );
+  await page.locator(".nav-item[data-view=overview]").click();
+  await expect(page.locator("#login-screen")).toBeVisible();
+  await expect(page.locator("#live-image")).not.toHaveAttribute("src");
+  await expect(page.locator("#live-badge")).toBeHidden();
+});
+
+test("live JPEG preview abandons stalled frames and recovers from invalid images", async ({
+  page,
+}) => {
+  await signin(page);
+  await page.locator(".nav-item[data-view=media]").click();
+  const jpeg = await (
+    await page.request.get("/api/v1/cameras/demo/preview.jpg")
+  ).body();
+  let requests = 0;
+  let aborted = 0;
+  let release;
+  page.on("requestfailed", (request) => {
+    if (request.url().endsWith("/preview.jpg")) aborted++;
+  });
+  await page.route("**/api/v1/cameras/demo/preview.jpg", async (route) => {
+    const request = ++requests;
+    if (request === 1) await new Promise((resolve) => (release = resolve));
+    await route
+      .fulfill({
+        contentType: "image/jpeg",
+        body: request === 2 ? Buffer.from("invalid JPEG") : jpeg,
+      })
+      .catch(() => {});
+  });
+  await page.locator(".nav-item[data-view=overview]").click();
+  await expect.poll(() => requests).toBe(1);
+  await expect(page.locator("#live-badge")).toBeHidden();
+  await expect.poll(() => aborted, { timeout: 5000 }).toBe(1);
+  await expect(page.locator("#live-empty p")).toHaveAttribute(
+    "data-i18n",
+    "liveUnavailable",
+  );
+  await expect.poll(() => requests).toBeGreaterThanOrEqual(3);
+  await expect(page.locator("#live-badge")).toBeVisible();
+  await expect
+    .poll(() =>
+      page.locator("#live-image").evaluate((image) => image.naturalWidth),
+    )
+    .toBe(640);
+  release();
+  await page.locator(".nav-item[data-view=media]").click();
+});
+
+test("live JPEG preview cancels camera switches and pauses in a hidden page", async ({
+  page,
+}) => {
+  await signin(page);
+  await page.locator(".nav-item[data-view=media]").click();
+  const cameras = await (await page.request.get("/api/v1/cameras")).json();
+  const jpeg = await (
+    await page.request.get("/api/v1/cameras/demo/preview.jpg")
+  ).body();
+  await page.route("**/api/v1/cameras", (route) =>
+    route.fulfill({
+      json: [
+        ...cameras,
+        { ...cameras[0], id: "alternate", name: "Alternate live camera" },
+      ],
+    }),
+  );
+  await page.locator("#refresh-button").click();
+  await expect(page.locator("#camera-count")).toHaveText("2 / 2");
+  let originalRequests = 0;
+  let alternateRequests = 0;
+  let aborted = 0;
+  let release;
+  page.on("requestfailed", (request) => {
+    if (request.url().endsWith("/demo/preview.jpg")) aborted++;
+  });
+  await page.route("**/api/v1/cameras/demo/preview.jpg", async (route) => {
+    originalRequests++;
+    await new Promise((resolve) => (release = resolve));
+    await route
+      .fulfill({ contentType: "image/jpeg", body: jpeg })
+      .catch(() => {});
+  });
+  await page.route("**/api/v1/cameras/alternate/preview.jpg", (route) => {
+    alternateRequests++;
+    return route.fulfill({ contentType: "image/jpeg", body: jpeg });
+  });
+  await page.locator(".nav-item[data-view=overview]").click();
+  await expect.poll(() => originalRequests).toBe(1);
+  await page.locator("#camera-select").selectOption("alternate");
+  await expect.poll(() => aborted).toBe(1);
+  await expect(page.locator("#live-badge")).toBeVisible();
+  await expect(page.locator("#active-camera-name")).toHaveText(
+    "Alternate live camera",
+  );
+  release();
+  await page.evaluate(() => {
+    Object.defineProperty(document, "hidden", {
+      value: true,
+      configurable: true,
+    });
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await expect(page.locator("#live-image")).not.toHaveAttribute("src");
+  await expect(page.locator("#live-badge")).toBeHidden();
+  const pausedRequests = alternateRequests;
+  await page.waitForTimeout(200);
+  expect(alternateRequests).toBe(pausedRequests);
+  await page.evaluate(() => {
+    Object.defineProperty(document, "hidden", {
+      value: false,
+      configurable: true,
+    });
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await expect.poll(() => alternateRequests).toBeGreaterThan(pausedRequests);
+  await expect(page.locator("#live-badge")).toBeVisible();
+  await expect
+    .poll(() =>
+      page.locator("#live-image").evaluate((image) => image.naturalWidth),
+    )
+    .toBe(640);
+  await page.locator(".nav-item[data-view=media]").click();
+});
+
+for (const [stage, stalledCall] of [
+  ["preloaded", 1],
+  ["displayed", 2],
+]) {
+  test(`live JPEG preview abandons a stalled ${stage} decoder without replaying it`, async ({
+    page,
+  }) => {
+    await signin(page);
+    await page.locator(".nav-item[data-view=media]").click();
+    const jpeg = await (
+      await page.request.get("/api/v1/cameras/demo/preview.jpg")
+    ).body();
+    await page.evaluate((stalledCall) => {
+      const decode = Image.prototype.decode;
+      let calls = 0;
+      Image.prototype.decode = function () {
+        if (this.src.startsWith("blob:") && ++calls === stalledCall)
+          return new Promise((resolve) => {
+            window.resolveStalledPreviewDecode = resolve;
+          });
+        return decode.call(this);
+      };
+    }, stalledCall);
+    let requests = 0;
+    const releases = [];
+    await page.route("**/api/v1/cameras/demo/preview.jpg", async (route) => {
+      if (++requests > 2)
+        await new Promise((resolve) => releases.push(resolve));
+      await route
+        .fulfill({ contentType: "image/jpeg", body: jpeg })
+        .catch(() => {});
+    });
+    await page.locator(".nav-item[data-view=overview]").click();
+    await expect.poll(() => requests).toBe(1);
+    await expect(page.locator("#live-badge")).toBeHidden();
+    await expect.poll(() => requests, { timeout: 5000 }).toBe(3);
+    await expect(page.locator("#live-badge")).toBeVisible();
+    await expect
+      .poll(() =>
+        page.locator("#live-image").evaluate((image) => image.naturalWidth),
+      )
+      .toBe(640);
+    const displayed = await page.locator("#live-image").getAttribute("src");
+    await page.evaluate(() => window.resolveStalledPreviewDecode());
+    await page.waitForTimeout(150);
+    await expect(page.locator("#live-image")).toHaveAttribute("src", displayed);
+    await page.locator(".nav-item[data-view=media]").click();
+    releases.forEach((release) => release());
+  });
+}
 
 test("viewer cannot capture or administer; logout revokes the session", async ({
   page,
@@ -190,4 +447,26 @@ test("optional MediaMTX delivers real WebRTC video and authenticated HLS", async
     path: "test-results/webrtc-desktop.png",
     fullPage: true,
   });
+  const jpeg = await (
+    await page.request.get("/api/v1/cameras/demo/preview.jpg")
+  ).body();
+  let release;
+  let requested = false;
+  await page.route("**/api/v1/cameras/demo/preview.jpg", async (route) => {
+    requested = true;
+    await new Promise((resolve) => (release = resolve));
+    await route
+      .fulfill({ contentType: "image/jpeg", body: jpeg })
+      .catch(() => {});
+  });
+  await page.locator("#live-video").dispatchEvent("error");
+  await expect.poll(() => requested).toBe(true);
+  try {
+    expect(await page.locator("#live-badge").isVisible()).toBe(false);
+  } finally {
+    release();
+  }
+  await expect(page.locator("#actual-transport")).toHaveText("JPEG");
+  await expect(page.locator("#live-image")).toBeVisible();
+  await page.locator(".nav-item[data-view=media]").click();
 });

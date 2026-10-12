@@ -15,6 +15,7 @@ from .models import CameraConfig, ControlPatch
 from .processes import NO_WINDOW, bounded_output
 
 DSHOW_MODE = re.compile(r"min s=(?P<low>\d+x\d+) fps=\S+ max s=(?P<high>\d+x\d+)")
+DSHOW_CLOCK_TOLERANCE_SECONDS = 0.005
 
 
 class CaptureError(RuntimeError):
@@ -278,6 +279,9 @@ class NetworkBackend(Backend):
     def video_filter(self):
         return f"scale={self.config.width}:{self.config.height},fps={self.config.fps}"
 
+    def output_arguments(self):
+        return []
+
     def open(self):
         command = [
             self.ffmpeg,
@@ -297,6 +301,7 @@ class NetworkBackend(Backend):
             # would quantize this local pipe heavily (about q=25 at 10 fps).
             "-q:v",
             "3",
+            *self.output_arguments(),
             "pipe:1",
         ]
         self.proc = subprocess.Popen(
@@ -310,21 +315,30 @@ class NetworkBackend(Backend):
         self.last_data = time.monotonic()
         self.capabilities.update(model=self.model, controls=[], audio=False)
 
-    def read(self):
+    def _read_jpeg(self, process=None, buffer=None):
+        process = process if process is not None else self.proc
+        buffer = buffer if buffer is not None else self.buffer
         while True:
-            start, end = self.buffer.find(b"\xff\xd8"), self.buffer.find(b"\xff\xd9")
+            start = buffer.find(b"\xff\xd8")
+            end = buffer.find(b"\xff\xd9", start + 2) if start >= 0 else -1
             if start >= 0 and end > start:
-                data = bytes(self.buffer[start : end + 2])
-                del self.buffer[: end + 2]
-                with Image.open(io.BytesIO(data)) as image:
-                    return image.convert("RGB")
-            chunk = self.proc.stdout.read(4096)
+                data = bytes(buffer[start : end + 2])
+                del buffer[: end + 2]
+                return data
+            # read(n) waits to fill n bytes. read1() returns bytes already delivered,
+            # including small low-FPS images, without waiting for a later frame.
+            read = getattr(process.stdout, "read1", process.stdout.read)
+            chunk = read(65536)
             if not chunk:
                 raise CaptureError(f"{self.model} is unavailable")
             self.last_data = time.monotonic()
-            self.buffer.extend(chunk)
-            if len(self.buffer) > 16 * 1024 * 1024:
+            buffer.extend(chunk)
+            if len(buffer) > 16 * 1024 * 1024:
                 raise CaptureError(f"{self.model} frame exceeds the supported size")
+
+    def read(self):
+        with Image.open(io.BytesIO(self._read_jpeg())) as image:
+            return image.convert("RGB")
 
     def close(self):
         if hasattr(self, "proc"):
@@ -340,7 +354,17 @@ class DirectShowBackend(NetworkBackend):
     stall_seconds = 10
     modes = None
     source_size = None
-    pending = None
+
+    def __init__(self, config, ffmpeg="ffmpeg"):
+        super().__init__(config, ffmpeg)
+        self.frames = threading.Condition()
+        self.closed = threading.Event()
+        self.reader_stop = threading.Event()
+        self.reader_thread = None
+        self.watch_thread = None
+        self.latest_jpeg = None
+        self.reader_error = None
+        self.dropped_frames = 0
 
     def native_modes(self):
         """Return the device's discrete capture sizes; listing them opens no capture stream."""
@@ -378,13 +402,20 @@ class DirectShowBackend(NetworkBackend):
         # it before scaling. A source mode can differ in shape: pad rather than distort.
         width, height = self.config.width, self.config.height
         return (
-            f"fps={self.config.fps},"
+            # The fps filter fills timestamp gaps by duplicating old images. Sample
+            # actual arrivals in clock buckets. Comparing with the previous selected
+            # timestamp would lose cadence whenever device timestamps jitter slightly.
+            "select='isnan(prev_selected_t)+lt(t,prev_selected_t)"
+            f"+gt(floor((t+{DSHOW_CLOCK_TOLERANCE_SECONDS})*{self.config.fps}),"
+            f"floor((prev_selected_t+{DSHOW_CLOCK_TOLERANCE_SECONDS})*{self.config.fps}))',"
             f"scale={width}:{height}:force_original_aspect_ratio=decrease:force_divisible_by=2,"
             f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2"
         )
 
+    def output_arguments(self):
+        return ["-fps_mode", "passthrough", "-flush_packets", "1"]
+
     def open(self):
-        self.pending = None
         self.modes = self.native_modes()
         profile = (self.config.width, self.config.height)
         self.source_size = self.source_mode(*profile) if self.modes else profile
@@ -393,31 +424,115 @@ class DirectShowBackend(NetworkBackend):
         if self.modes:
             return
         try:
-            self.pending = super().read()
+            # Keep the first complete JPEG in the same bounded slot used by read().
+            with self.frames:
+                self.frames.wait_for(
+                    lambda: self.closed.is_set() or self.reader_stop.is_set()
+                    or self.latest_jpeg is not None or self.reader_error
+                )
+                if self.closed.is_set() or self.reader_stop.is_set():
+                    raise CaptureError("DirectShow camera is closed")
+                if self.latest_jpeg is None:
+                    raise CaptureError(self.reader_error)
         except CaptureError:
+            if self.closed.is_set():
+                raise
             # Unknown modes and no frame at the profile size: use the device's default mode.
-            self.close()
+            self._stop_stream()
             self.source_size = None
             self._spawn()
 
     def _spawn(self):
-        super().open()
-        threading.Thread(target=self._watch, args=(self.proc,), daemon=True).start()
+        with self.lock:
+            if self.closed.is_set():
+                raise CaptureError("DirectShow camera is closed")
+            super().open()
+            with self.frames:
+                self.latest_jpeg, self.reader_error = None, None
+                self.last_frame = time.monotonic()
+                self.reader_stop = threading.Event()
+            self.capabilities["frame_delivery"] = "latest"
+            self.reader_thread = threading.Thread(
+                target=self._drain, args=(self.proc, self.buffer, self.reader_stop),
+                name=f"dshow-pipe-{self.config.id}", daemon=True,
+            )
+            self.watch_thread = threading.Thread(
+                target=self._watch, args=(self.proc, self.reader_stop),
+                name=f"dshow-watch-{self.config.id}", daemon=True,
+            )
+            self.reader_thread.start()
+            self.watch_thread.start()
 
-    def _watch(self, process):
+    def _drain(self, process, buffer, stopped):
+        try:
+            while not stopped.is_set():
+                jpeg = self._read_jpeg(process, buffer)
+                with self.frames:
+                    if stopped.is_set():
+                        break
+                    if self.latest_jpeg is not None:
+                        self.dropped_frames += 1
+                    self.latest_jpeg = jpeg
+                    self.last_frame = time.monotonic()
+                    self.frames.notify_all()
+        except (CaptureError, OSError, ValueError) as exc:
+            with self.frames:
+                self.reader_error = (
+                    str(exc) if isinstance(exc, CaptureError) else "DirectShow camera is unavailable"
+                )
+                self.frames.notify_all()
+
+    def _watch(self, process, stopped):
         # DirectShow input has no I/O timeout: a stalled device would block read() forever.
         # Stopping FFmpeg turns the stall into a normal reconnect by the capture loop.
         while process.poll() is None:
-            if time.monotonic() - self.last_data > self.stall_seconds:
-                process.kill()
+            if stopped.is_set():
                 return
-            time.sleep(0.5)
+            if time.monotonic() - self.last_frame > self.stall_seconds:
+                try:
+                    process.kill()
+                except OSError:
+                    if process.poll() is None:
+                        raise
+                return
+            stopped.wait(0.5)
 
     def read(self):
-        if self.pending is not None:
-            image, self.pending = self.pending, None
-            return image
-        return super().read()
+        stopped = self.reader_stop
+        with self.frames:
+            self.frames.wait_for(
+                lambda: stopped.is_set() or self.latest_jpeg is not None or self.reader_error
+            )
+            if stopped.is_set() or self.latest_jpeg is None:
+                raise CaptureError(self.reader_error or "DirectShow camera is unavailable")
+            jpeg, self.latest_jpeg = self.latest_jpeg, None
+            self.frame_received_at = self.last_frame
+            if time.monotonic() - self.last_frame > 5:
+                raise CaptureError("DirectShow camera has no current frame")
+        with Image.open(io.BytesIO(jpeg)) as image:
+            return image.convert("RGB")
+
+    def close(self):
+        # A profile/service cancellation is durable; a mode-negotiation retry only
+        # stops its current subprocess and must not undo a concurrent close().
+        self.closed.set()
+        self._stop_stream()
+
+    def _stop_stream(self):
+        with self.lock:
+            self.reader_stop.set()
+            with self.frames:
+                self.latest_jpeg = None
+                self.frames.notify_all()
+            if hasattr(self, "proc"):
+                terminate_process(self.proc)
+            for worker in (self.reader_thread, self.watch_thread):
+                if worker and worker.is_alive():
+                    worker.join(timeout=5)
+                    if worker.is_alive():
+                        raise CaptureError("DirectShow worker did not stop")
+            if hasattr(self, "proc") and self.proc.stdout:
+                self.proc.stdout.close()
 
 
 class LegacyBackend(Backend):
