@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import threading
 
 # The Windows background service runs under windowless pythonw.exe. Each console child
 # (MediaMTX, FFmpeg) would otherwise open its own visible console window; closing that
@@ -12,6 +13,37 @@ NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+
+
+def bounded_output(command: list[str], *, limit: int, timeout: float) -> bytes:
+    """Return a short-lived child's diagnostic output, stopping it on overrun or timeout."""
+    output = bytearray()
+    with subprocess.Popen(
+        command,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        creationflags=NO_WINDOW,
+    ) as process:
+
+        def collect():
+            while chunk := process.stderr.read(8192):
+                output.extend(chunk)
+                if len(output) > limit:
+                    process.kill()
+                    return
+
+        reader = threading.Thread(target=collect, daemon=True)
+        reader.start()
+        try:
+            process.wait(timeout=timeout)
+        finally:
+            if process.poll() is None:
+                process.kill()
+            reader.join(timeout=5)
+    if len(output) > limit:
+        raise ValueError("Child process output exceeds its size limit")
+    return bytes(output)
 
 
 def contain_children() -> bool:

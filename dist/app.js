@@ -386,6 +386,26 @@
       ...details.flatMap(([k, v]) => [make("dt", "", k), make("dd", "", v)]),
     );
   }
+  const defaultResolutions = [...$("#setting-resolution").options].map(
+    (o) => o.value,
+  );
+  function resolutionOptions(c, size) {
+    // Cameras that report native modes offer only those sizes.
+    const sizes = c.capabilities.modes?.length
+      ? c.capabilities.modes
+      : defaultResolutions;
+    const values = sizes.includes(size) ? sizes : [...sizes, size];
+    const select = $("#setting-resolution");
+    if (values.join() !== [...select.options].map((o) => o.value).join())
+      select.replaceChildren(
+        ...values.map((value) => {
+          const option = make("option", "", value.replace("x", " × "));
+          option.value = value;
+          return option;
+        }),
+      );
+    select.value = size;
+  }
   function renderCamera() {
     const c = active();
     $("#active-camera-name").textContent = c?.name || t("camera");
@@ -423,15 +443,7 @@
       !$("#camera-settings-form").contains(document.activeElement)
     ) {
       $("#setting-camera-name").value = c.name;
-      const size = `${c.width}x${c.height}`;
-      if (
-        ![...$("#setting-resolution").options].some((o) => o.value === size)
-      ) {
-        const o = make("option", "", size);
-        o.value = size;
-        $("#setting-resolution").append(o);
-      }
-      $("#setting-resolution").value = size;
+      resolutionOptions(c, `${c.width}x${c.height}`);
       $("#setting-fps").value = c.fps_target;
       $("#setting-preroll").value = c.preroll_seconds;
       $("#setting-motion").checked = c.motion_enabled;

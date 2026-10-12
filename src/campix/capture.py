@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import math
+import re
 import shutil
 import subprocess
 import threading
@@ -11,7 +12,9 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageEnhance
 
 from .models import CameraConfig, ControlPatch
-from .processes import NO_WINDOW
+from .processes import NO_WINDOW, bounded_output
+
+DSHOW_MODE = re.compile(r"min s=(?P<low>\d+x\d+) fps=\S+ max s=(?P<high>\d+x\d+)")
 
 
 class CaptureError(RuntimeError):
@@ -290,6 +293,10 @@ class NetworkBackend(Backend):
             "image2pipe",
             "-c:v",
             "mjpeg",
+            # Frames are re-encoded at the profile quality. FFmpeg's default rate control
+            # would quantize this local pipe heavily (about q=25 at 10 fps).
+            "-q:v",
+            "3",
             "pipe:1",
         ]
         self.proc = subprocess.Popen(
@@ -300,6 +307,7 @@ class NetworkBackend(Backend):
             creationflags=NO_WINDOW,
         )
         self.buffer = bytearray()
+        self.last_data = time.monotonic()
         self.capabilities.update(model=self.model, controls=[], audio=False)
 
     def read(self):
@@ -313,6 +321,7 @@ class NetworkBackend(Backend):
             chunk = self.proc.stdout.read(4096)
             if not chunk:
                 raise CaptureError(f"{self.model} is unavailable")
+            self.last_data = time.monotonic()
             self.buffer.extend(chunk)
             if len(self.buffer) > 16 * 1024 * 1024:
                 raise CaptureError(f"{self.model} frame exceeds the supported size")
@@ -328,35 +337,81 @@ class DirectShowBackend(NetworkBackend):
     """Windows USB or integrated camera captured through FFmpeg's DirectShow input."""
 
     model = "DirectShow camera"
-    native_size = True
+    stall_seconds = 10
+    modes = None
+    source_size = None
     pending = None
 
+    def native_modes(self):
+        """Return the device's discrete capture sizes; listing them opens no capture stream."""
+        command = [self.ffmpeg, "-hide_banner", "-nostdin", "-list_options", "true", "-f", "dshow"]
+        try:
+            listing = bounded_output(
+                [*command, "-i", "video=" + self.config.source], limit=65536, timeout=10
+            ).decode("utf-8", "replace")
+        except (OSError, subprocess.SubprocessError, ValueError):
+            return None
+        sizes = set()
+        for match in DSHOW_MODE.finditer(listing):
+            if match["low"] != match["high"]:
+                return None  # A continuous range: any profile size may be native.
+            sizes.add(tuple(int(part) for part in match["low"].split("x")))
+        return sorted(sizes, key=lambda size: (size[0] * size[1], size)) or None
+
+    def source_mode(self, width, height):
+        """Use the profile size natively, else the smallest mode covering it."""
+        covering = [mode for mode in self.modes if mode[0] >= width and mode[1] >= height]
+        same_shape = [mode for mode in covering if mode[0] * height == mode[1] * width]
+        # A profile beyond every mode is upscaled from the largest one; the API rejects such
+        # profiles once modes are known, but older profiles must keep working.
+        return (same_shape or covering or [self.modes[-1]])[0]
+
     def input_arguments(self):
-        # Webcams often default to raw full HD at a fixed 30 fps. Request the profile size
-        # natively; a requested frame rate outside the device's list would fail to open.
-        mode = ["-video_size", f"{self.config.width}x{self.config.height}"]
+        # Webcams often default to raw full HD at a fixed 30 fps, so request a native mode.
+        mode = ["-video_size", "{}x{}".format(*self.source_size)] if self.source_size else []
         # One argument and no shell; validation rejects ":" so no audio device can be added.
         source = ["-i", "video=" + self.config.source]
-        return ["-f", "dshow", "-rtbufsize", "32M", *(mode if self.native_size else []), *source]
+        return ["-f", "dshow", "-rtbufsize", "32M", *mode, *source]
 
     def video_filter(self):
-        # A fallback mode can differ in aspect ratio: pad rather than distort the image.
+        # Requesting a frame rate the device does not list would fail, so a filter reduces
+        # it before scaling. A source mode can differ in shape: pad rather than distort.
         width, height = self.config.width, self.config.height
         return (
+            f"fps={self.config.fps},"
             f"scale={width}:{height}:force_original_aspect_ratio=decrease:force_divisible_by=2,"
-            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,fps={self.config.fps}"
+            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2"
         )
 
     def open(self):
-        self.native_size, self.pending = True, None
-        super().open()
+        self.pending = None
+        self.modes = self.native_modes()
+        profile = (self.config.width, self.config.height)
+        self.source_size = self.source_mode(*profile) if self.modes else profile
+        self._spawn()
+        self.capabilities["modes"] = [f"{width}x{height}" for width, height in self.modes or ()]
+        if self.modes:
+            return
         try:
             self.pending = super().read()
         except CaptureError:
-            # No native mode of this size (or the device is busy): use its default mode.
+            # Unknown modes and no frame at the profile size: use the device's default mode.
             self.close()
-            self.native_size = False
-            super().open()
+            self.source_size = None
+            self._spawn()
+
+    def _spawn(self):
+        super().open()
+        threading.Thread(target=self._watch, args=(self.proc,), daemon=True).start()
+
+    def _watch(self, process):
+        # DirectShow input has no I/O timeout: a stalled device would block read() forever.
+        # Stopping FFmpeg turns the stall into a normal reconnect by the capture loop.
+        while process.poll() is None:
+            if time.monotonic() - self.last_data > self.stall_seconds:
+                process.kill()
+                return
+            time.sleep(0.5)
 
     def read(self):
         if self.pending is not None:

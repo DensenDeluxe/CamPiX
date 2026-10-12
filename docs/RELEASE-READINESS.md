@@ -90,6 +90,42 @@ These results cover one webcam on one host. They are not recorded here:
 - Linux/macOS runs of the new tests
 - A replacement of the installed `c396dd0` deployment
 
+## Windows webcam resolution correction — 12 October 2026
+
+On the same host, the `ed2f01a` installation replaced `c396dd0`. Stopping the old task with `Stop-ScheduledTask` had left its managed `mediamtx.exe` running, holding the managed ports. The new task left no CamPiX or FFmpeg process behind.
+
+The webcam came online with the 640×480 setup profile. The settings view offered sizes up to 3840×2160 regardless of the camera. After 3840×2160 was selected for this 1080p camera, two failures followed:
+
+- **Upscaling and stall.** The backend upscaled every raw 1920×1080 frame at 30 fps to 4K before reducing the rate. Frame delivery stopped once the browser opened the 4K stream, and a `camera.stalled` event followed.
+- **No recovery.** After a switch to 1280×720, the new FFmpeg process waited without CPU use for almost five minutes. It delivered frames only then, because nothing restarted the stalled DirectShow input.
+
+The MJPEG pipe between FFmpeg and CamPiX also used FFmpeg's default rate control: about q=25 at 10 fps, compared with q=3 at `-q:v 3`.
+
+Isolated runs at 4K, with and without managed MediaMTX publishing, delivered about 9 fps without a stall. The stall therefore was not reproduced on demand; the watchdog addresses the missing recovery rather than one specific trigger.
+
+The changes:
+
+- CamPiX now lists native capture sizes when a camera opens. The settings view offers only those sizes, and the API rejects other sizes with HTTP 409 without touching the running capture.
+- FFmpeg reduces the frame rate before scaling.
+- A stream that delivers no data for 10 seconds is stopped, so the existing reconnect applies.
+- The pipe keeps frames near-lossless.
+- Setup starts DirectShow cameras at 1280×720.
+
+The Windows/Python 3.11.9 suite recorded **134 passes and 2 explicit skips**. With the host's service stopped and MediaMTX v1.21.2 configured, it recorded **135 passes and 1 POSIX-only skip**. The Chromium suite then recorded **6 passes**, including WebRTC video and HLS. Against `ed2f01a`, 15 of the new or changed DirectShow tests failed.
+
+On the ACER FHD User Facing webcam, in a windowless service:
+
+| Check                         | Result                                                                                       |
+| ----------------------------- | -------------------------------------------------------------------------------------------- |
+| Setup profile                 | 1280×720 at 10 fps                                                                           |
+| Reported native sizes         | 640×360, 640×480, 1280×720, 1920×1080                                                        |
+| Chromium resolution menu      | Exactly those four sizes                                                                     |
+| 3840×2160 requested           | HTTP 409 with the supported list; the camera stayed online with frame ages of 0.11 s or less |
+| 1920×1080 requested           | Online at 9.5 fps; FFmpeg used 1.3 % of host CPU                                             |
+| Console windows and processes | No new visible window; no CamPiX or FFmpeg process remained                                  |
+
+A forced driver stall, disconnect recovery on real hardware, and the rebuilt task installation are not recorded here.
+
 ## Remaining production gates
 
 1. Test at least Pi 4/CM4 and Pi 5/CM5 on their target operating systems with official and relevant Arducam/third-party sensors. Qualify UVC devices and at least one RTSP camera separately. Device discovery is not full functional certification.

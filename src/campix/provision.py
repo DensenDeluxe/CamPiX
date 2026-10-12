@@ -9,7 +9,6 @@ import struct
 import subprocess
 import sys
 import tempfile
-import threading
 from collections.abc import Callable
 from contextlib import closing
 from pathlib import Path
@@ -18,7 +17,7 @@ from .config import Settings
 from .db import Database
 from .models import CameraConfig, UserCreate, directshow_source_valid
 from .process_lock import ProcessLock
-from .processes import NO_WINDOW
+from .processes import NO_WINDOW, bounded_output
 from .security import HASHER
 
 # QUERYCAP reads driver metadata; it does not allocate buffers or start capture.
@@ -100,32 +99,8 @@ def _is_usb_picamera(item: dict) -> bool:
 
 def _directshow_listing(ffmpeg: str, timeout: float = 10) -> str:
     """List DirectShow devices with bounded output; listing does not open a capture stream."""
-    output = bytearray()
-    with subprocess.Popen(
-        [ffmpeg, "-hide_banner", "-nostdin", "-list_devices", "true", "-f", "dshow", "-i", "dummy"],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        creationflags=NO_WINDOW,
-    ) as process:
-
-        def collect():
-            while chunk := process.stderr.read(8192):
-                output.extend(chunk)
-                if len(output) > INVENTORY_BYTES:
-                    process.kill()
-                    return
-
-        reader = threading.Thread(target=collect, daemon=True)
-        reader.start()
-        try:
-            process.wait(timeout=timeout)
-        finally:
-            if process.poll() is None:
-                process.kill()
-            reader.join(timeout=5)
-    if len(output) > INVENTORY_BYTES:
-        raise ValueError("DirectShow device list exceeds its size limit")
+    command = [ffmpeg, "-hide_banner", "-nostdin", "-list_devices", "true", "-f", "dshow"]
+    output = bounded_output([*command, "-i", "dummy"], limit=INVENTORY_BYTES, timeout=timeout)
     # The list ends with an intentional "dummy" input error, so the exit status is ignored.
     return output.decode("utf-8", "replace")
 
@@ -507,13 +482,16 @@ def setup(
                 if len(identifiers) >= settings.max_cameras:
                     skipped.append({"source": device["source"], "reason": "camera-limit"})
                     continue
+                # PC webcams commonly list 1280x720 natively, the API default for new profiles;
+                # board-attached cameras keep the smaller profile.
+                width, height = (1280, 720) if device["backend"] == "dshow" else (640, 480)
                 camera = CameraConfig(
                     id=camera_id,
                     name=(device["model"] or "Local camera")[:80],
                     backend=device["backend"],
                     source=device["source"],
-                    width=640,
-                    height=480,
+                    width=width,
+                    height=height,
                     fps=10,
                     encoder="auto",
                 )

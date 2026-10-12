@@ -2,12 +2,15 @@ import io
 import json
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from PIL import Image
 
-from campix import capture, provision
+from campix import capture, provision, runtime
 from campix.config import Settings
 from campix.db import Database
 from campix.models import CameraConfig
@@ -55,9 +58,9 @@ def windows_inventory(monkeypatch, listing):
     return result
 
 
-def camera(source="Integrated Camera", **values):
+def camera(source="Integrated Camera", width=640, height=480):
     return CameraConfig(
-        id="webcam", name="Webcam", backend="dshow", source=source, width=640, height=480, **values
+        id="webcam", name="Webcam", backend="dshow", source=source, width=width, height=height
     )
 
 
@@ -261,7 +264,8 @@ def test_setup_registers_directshow_camera_once(tmp_path, monkeypatch):
     assert [(item["backend"], item["source"], item["name"]) for item in added] == [
         ("dshow", "Integrated Camera", "Integrated Camera")
     ]
-    assert (added[0]["width"], added[0]["height"], added[0]["fps"]) == (640, 480, 10)
+    # PC webcams start at the common native 720p mode instead of the board profile.
+    assert (added[0]["width"], added[0]["height"], added[0]["fps"]) == (1280, 720, 10)
     assert result["hardware_qualified"] is False
     # A profile that uses the alternative name is the same physical camera.
     db = Database(settings.data_dir / "campix.sqlite3")
@@ -289,6 +293,22 @@ def test_discovery_api_lists_with_the_configured_ffmpeg(client, application, mon
     assert requested == [{"ffmpeg": application.state.settings.ffmpeg}]
 
 
+MODES = [(640, 360), (640, 480), (1280, 720), (1920, 1080)]
+# FFmpeg 8.1.1 -list_options output of the measured integrated webcam, in device order.
+OPTIONS = "\n".join(
+    [
+        "[in#0 @ 000001e8] DirectShow video device options (from video devices)",
+        '[in#0 @ 000001e8]  Pin "Capture" (alternative pin name "Capture")',
+        *(
+            f"[in#0 @ 000001e8]   pixel_format={pixel}  min s={size} fps=30 max s={size} fps=30"
+            for pixel in ("nv12", "yuyv422")
+            for size in ("1280x720", "1920x1080", "640x360", "640x480")
+        ),
+        "Error opening input file video=Integrated Camera.",
+    ]
+)
+
+
 class FakeFFmpeg:
     def __init__(self, output):
         self.stdout = io.BytesIO(output)
@@ -306,24 +326,102 @@ class FakeFFmpeg:
         return self.returncode
 
 
+class StalledFFmpeg(FakeFFmpeg):
+    """A device that opens but delivers nothing until FFmpeg is stopped."""
+
+    def __init__(self):
+        super().__init__(b"")
+        self.stopped = threading.Event()
+        self.stdout = SimpleNamespace(read=self.stalled_read, close=lambda: None)
+
+    def stalled_read(self, size):
+        self.stopped.wait(10)
+        return b""
+
+    def terminate(self):
+        self.returncode = 1
+        self.stopped.set()
+
+    kill = terminate
+
+
 def jpeg(size=(640, 480)):
     buffer = io.BytesIO()
     Image.new("RGB", size, (7, 19, 33)).save(buffer, "JPEG")
     return buffer.getvalue()
 
 
-def launch(monkeypatch, *outputs):
+def launch(monkeypatch, *outputs, modes=MODES):
     launched = []
 
     def popen(command, **kwargs):
         launched.append((command, kwargs))
-        return FakeFFmpeg(outputs[len(launched) - 1])
+        output = outputs[len(launched) - 1]
+        return output if isinstance(output, FakeFFmpeg) else FakeFFmpeg(output)
 
     monkeypatch.setattr(capture.subprocess, "Popen", popen)
+    monkeypatch.setattr(capture.DirectShowBackend, "native_modes", lambda self: modes)
     return launched
 
 
-def test_directshow_backend_requests_the_profile_size_natively(monkeypatch):
+def test_mode_list_reports_discrete_native_sizes_without_capture(monkeypatch):
+    requested = []
+
+    def listing(command, **kwargs):
+        requested.append((command, kwargs))
+        return OPTIONS.encode()
+
+    monkeypatch.setattr(capture, "bounded_output", listing)
+    assert capture.make_backend(camera(), r"C:\tools\ffmpeg.exe").native_modes() == MODES
+    assert requested == [
+        (
+            [
+                r"C:\tools\ffmpeg.exe",
+                "-hide_banner",
+                "-nostdin",
+                "-list_options",
+                "true",
+                "-f",
+                "dshow",
+                "-i",
+                "video=Integrated Camera",
+            ],
+            {"limit": 65536, "timeout": 10},
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    "listing",
+    [
+        b"[in#0 @ 0]   vcodec=mjpeg  min s=160x120 fps=5 max s=1920x1080 fps=30",
+        b"Error opening input file video=Integrated Camera.",
+        OSError("FFmpeg is missing"),
+        subprocess.TimeoutExpired("ffmpeg", 10),
+        ValueError("too much output"),
+    ],
+)
+def test_unknown_or_continuous_mode_lists_leave_sizes_unrestricted(monkeypatch, listing):
+    def list_options(command, **kwargs):
+        if isinstance(listing, Exception):
+            raise listing
+        return listing
+
+    monkeypatch.setattr(capture, "bounded_output", list_options)
+    assert capture.make_backend(camera(), "ffmpeg").native_modes() is None
+
+
+def test_source_mode_prefers_native_then_the_smallest_covering_mode():
+    backend = capture.make_backend(camera(), "ffmpeg")
+    backend.modes = [(640, 480), (1280, 720), (1280, 960), (1920, 1080)]
+    assert backend.source_mode(1280, 720) == (1280, 720)
+    assert backend.source_mode(800, 600) == (1280, 960)
+    assert backend.source_mode(1024, 576) == (1280, 720)
+    # Only older, unvalidated profiles exceed every mode; they scale from the largest.
+    assert backend.source_mode(3840, 2160) == (1920, 1080)
+
+
+def test_directshow_backend_requests_a_native_mode_and_reduces_the_rate_first(monkeypatch):
     launched = launch(monkeypatch, jpeg() * 2)
     backend = capture.make_backend(camera(), "ffmpeg")
     backend.open()
@@ -336,15 +434,28 @@ def test_directshow_backend_requests_the_profile_size_natively(monkeypatch):
     assert command[command.index("-f") + 1] == "dshow"
     assert command[command.index("-video_size") + 1] == "640x480"
     assert command[command.index("-i") + 1] == "video=Integrated Camera"
-    # Webcams with fixed frame-rate lists reject other rates; the filter reduces it.
+    # Webcams with fixed frame-rate lists reject other rates; the filter reduces it
+    # before any scaling, so FFmpeg scales 10 rather than 30 frames per second.
     assert "-framerate" not in command
-    assert command[command.index("-vf") + 1].endswith(",fps=10")
+    assert command[command.index("-vf") + 1].startswith("fps=10,scale=640:480")
+    assert command[command.index("-q:v") + 1] == "3"
     assert kwargs["creationflags"] == NO_WINDOW and "shell" not in kwargs
     assert backend.capabilities["model"] == "DirectShow camera"
+    assert backend.capabilities["modes"] == ["640x360", "640x480", "1280x720", "1920x1080"]
 
 
-def test_directshow_backend_falls_back_to_the_default_mode_without_distortion(monkeypatch):
-    launched = launch(monkeypatch, b"", jpeg())
+def test_profile_beyond_every_mode_uses_the_largest_native_mode(monkeypatch):
+    launched = launch(monkeypatch, b"")
+    backend = capture.make_backend(camera(width=3840, height=2160), "ffmpeg")
+    backend.open()
+    backend.close()
+    command = launched[0][0]
+    assert len(launched) == 1
+    assert command[command.index("-video_size") + 1] == "1920x1080"
+
+
+def test_unknown_modes_try_the_profile_size_then_the_default_mode(monkeypatch):
+    launched = launch(monkeypatch, b"", jpeg(), modes=None)
     backend = capture.make_backend(camera(), "ffmpeg")
     backend.open()
     try:
@@ -354,12 +465,14 @@ def test_directshow_backend_falls_back_to_the_default_mode_without_distortion(mo
     native, fallback = (command for command, _ in launched)
     assert "-video_size" in native and "-video_size" not in fallback
     video_filter = fallback[fallback.index("-vf") + 1]
+    assert video_filter.startswith("fps=10,")
     assert "force_original_aspect_ratio=decrease" in video_filter
     assert "pad=640:480" in video_filter
+    assert backend.capabilities["modes"] == []
 
 
 def test_unavailable_directshow_camera_reports_capture_error(monkeypatch):
-    launch(monkeypatch, b"", b"")
+    launch(monkeypatch, b"", b"", modes=None)
     backend = capture.make_backend(camera(), "ffmpeg")
     backend.open()
     try:
@@ -367,3 +480,68 @@ def test_unavailable_directshow_camera_reports_capture_error(monkeypatch):
             backend.read()
     finally:
         backend.close()
+
+
+def test_stalled_directshow_stream_is_stopped_for_a_reconnect(monkeypatch):
+    monkeypatch.setattr(capture.DirectShowBackend, "stall_seconds", 0.3)
+    stalled = StalledFFmpeg()
+    launch(monkeypatch, stalled)
+    backend = capture.make_backend(camera(), "ffmpeg")
+    backend.open()
+    started = time.monotonic()
+    try:
+        # Without the watchdog this read would block for as long as the driver stalls.
+        with pytest.raises(capture.CaptureError, match="DirectShow camera is unavailable"):
+            backend.read()
+    finally:
+        backend.close()
+    assert stalled.stopped.is_set()
+    assert time.monotonic() - started < 5
+
+
+def test_network_frames_cross_the_pipe_nearly_lossless(monkeypatch):
+    launched = launch(monkeypatch, b"")
+    source = CameraConfig(id="ip", name="IP", backend="network", source="rtsp://192.0.2.10/live")
+    backend = capture.make_backend(source, "ffmpeg")
+    backend.open()
+    backend.close()
+    command = launched[0][0]
+    assert command[command.index("-q:v") + 1] == "3"
+
+
+class ModeReportingBackend(capture.Backend):
+    def open(self):
+        self.capabilities.update(model="DirectShow camera", modes=["640x480", "1280x720"])
+
+    def read(self):
+        time.sleep(0.05)
+        return Image.new("RGB", (self.config.width, self.config.height))
+
+
+def test_directshow_profiles_accept_only_native_modes(client, application, monkeypatch):
+    real = runtime.make_backend
+
+    def make_backend(config, ffmpeg):
+        if config.backend == "dshow":
+            return ModeReportingBackend(config, ffmpeg)
+        return real(config, ffmpeg)
+
+    monkeypatch.setattr(runtime, "make_backend", make_backend)
+    signin(client)
+    profile = {"id": "webcam", "name": "Webcam", "backend": "dshow", "source": "Webcam"}
+    created = client.post("/api/v1/cameras", json={**profile, "width": 640, "height": 480})
+    assert created.status_code == 201, created.text
+    camera = application.state.cameras.get("webcam")
+    deadline = time.monotonic() + 5
+    while camera.status != "online" and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert camera.status == "online"
+    rejected = client.patch("/api/v1/cameras/webcam", json={"width": 3840, "height": 2160})
+    assert rejected.status_code == 409
+    assert rejected.json()["detail"] == "This camera captures only 640x480, 1280x720"
+    # A refused size must not interrupt the running capture or change the profile.
+    assert application.state.cameras.get("webcam") is camera
+    assert camera.status == "online"
+    assert client.get("/api/v1/cameras/webcam/config").json()["width"] == 640
+    accepted = client.patch("/api/v1/cameras/webcam", json={"width": 1280, "height": 720})
+    assert accepted.status_code == 200, accepted.text

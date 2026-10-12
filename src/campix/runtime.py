@@ -362,6 +362,15 @@ class CameraManager:
             if previous:
                 if previous.info()["recording"]:
                     raise CaptureError("Stop recording before changing the camera profile")
+                same_device = (previous.config.backend, previous.config.source) == (
+                    config.backend,
+                    config.source,
+                )
+                modes = previous.backend.capabilities.get("modes") if previous.backend else None
+                # Accept only reported native sizes: anything larger would be upscaled at a
+                # high CPU cost without adding detail. The running profile stays untouched.
+                if same_device and modes and f"{config.width}x{config.height}" not in modes:
+                    raise CaptureError("This camera captures only " + ", ".join(modes))
                 previous.stop()
             self.db.execute(
                 "INSERT INTO cameras VALUES (?,?) ON CONFLICT(id) DO UPDATE SET config=excluded.config",
