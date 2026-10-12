@@ -678,6 +678,78 @@ test("optional MediaMTX delivers real WebRTC video and authenticated HLS", async
   const hls = await page.request.get("/api/v1/streams/demo/hls/index.m3u8");
   expect(hls.status()).toBe(200);
   expect(await hls.text()).toContain("#EXTM3U");
+  const sourceBefore = (
+    await (await page.request.get("/api/v1/cameras")).json()
+  )[0];
+  expect(sourceBefore.encoding.shared).toBe(true);
+  expect(sourceBefore.encoding.packet_ready).toBe(true);
+  const sessions = sourceBefore.encoding.encoder_sessions_started;
+  const epoch = sourceBefore.encoding.packet_stream.epoch;
+  const framesBefore = await page
+    .locator("#live-video")
+    .evaluate((video) => video.getVideoPlaybackQuality().totalVideoFrames);
+  const started = page.waitForResponse(
+    (response) =>
+      response.url().endsWith("/demo/recording") &&
+      response.request().method() === "POST",
+  );
+  await page.locator("#record-button").click();
+  expect((await started).status()).toBe(200);
+  await expect(page.locator("#record-label")).toHaveText("Aufnahme beenden");
+  await expect
+    .poll(() =>
+      page
+        .locator("#live-video")
+        .evaluate((video) => video.getVideoPlaybackQuality().totalVideoFrames),
+    )
+    .toBeGreaterThan(framesBefore + 2);
+  const stopped = page.waitForResponse(
+    (response) =>
+      response.url().endsWith("/demo/recording") &&
+      response.request().method() === "DELETE",
+  );
+  await page.locator("#record-button").click();
+  const stopResponse = await stopped;
+  expect(stopResponse.status()).toBe(200);
+  const recorded = await stopResponse.json();
+  expect(recorded.kind).toBe("video");
+  const sourceAfter = (
+    await (await page.request.get("/api/v1/cameras")).json()
+  )[0];
+  expect(sourceAfter.encoding.encoder_sessions_started).toBe(sessions);
+  expect(sourceAfter.encoding.packet_stream.epoch).toBe(epoch);
+  const system = await (await page.request.get("/api/v1/system")).json();
+  expect(system.media_plane.publishers.demo.packet_passthrough).toBe(true);
+  expect(system.media_plane.publishers.demo.packet_ready).toBe(true);
+  const videoReady = await page.evaluate(async (id) => {
+    const response = await fetch(`/api/v1/media/${id}/file`);
+    const url = URL.createObjectURL(await response.blob());
+    const video = document.createElement("video");
+    video.muted = true;
+    video.hidden = true;
+    document.body.append(video);
+    try {
+      return await new Promise((resolve) => {
+        const timer = setTimeout(() => resolve(false), 8000);
+        video.onloadeddata = () => {
+          clearTimeout(timer);
+          resolve(video.videoWidth > 0);
+        };
+        video.onerror = () => {
+          clearTimeout(timer);
+          resolve(false);
+        };
+        video.src = url;
+        video.load();
+      });
+    } finally {
+      video.removeAttribute("src");
+      video.load();
+      video.remove();
+      URL.revokeObjectURL(url);
+    }
+  }, recorded.id);
+  expect(videoReady).toBe(true);
   await page.screenshot({
     path: "test-results/webrtc-desktop.png",
     fullPage: true,

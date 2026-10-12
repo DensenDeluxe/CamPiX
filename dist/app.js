@@ -254,7 +254,9 @@
       !operate() ||
       camera?.status !== "online" ||
       (!camera.recording &&
-        (camera.encoding.preparing || !camera.encoding.selected));
+        (camera.encoding.preparing ||
+          !camera.encoding.selected ||
+          !camera.encoding.packet_ready));
   }
   function translate() {
     document.documentElement.lang = s.lang;
@@ -1019,6 +1021,25 @@
           ],
           ["Hardware encoding", c.encoding.selected_hardware ? "yes" : "no"],
           ["Profile probe passed", c.encoding.profile_tested ? "yes" : "no"],
+          [
+            "Shared stream / recording encoder",
+            c.encoding.shared ? "yes" : "no",
+          ],
+          ["H.264 packets ready", c.encoding.packet_ready ? "yes" : "no"],
+          ["Encoded source", c.encoding.source || "—"],
+          [
+            "Raw-frame zero-copy",
+            c.encoding.zero_copy_raw_frames ? "yes" : "no",
+          ],
+          ["Zero-copy scope", c.encoding.zero_copy_scope || "—"],
+          ["Zero-copy fallback", c.encoding.zero_copy_reason || "—"],
+          ["Native capture fallback", c.encoding.native_fallback_reason || "—"],
+          [
+            "Encoder sessions started",
+            c.encoding.encoder_sessions_started ?? "—",
+          ],
+          ["Preview size", c.preview_size?.join("×") || "—"],
+          ["Preview FPS", c.preview_fps ?? "—"],
           ["Encoder fallback", c.encoding.fallback_reason || "—"],
           [
             t("liveEncoder"),

@@ -1,4 +1,5 @@
 import ast
+import io
 import logging
 import os
 import subprocess
@@ -34,6 +35,38 @@ def test_bounded_output_preserves_binary_stderr_and_discards_stdout():
         "import sys; sys.stdout.buffer.write(b'ignored'); sys.stderr.buffer.write(b'\\x00\\xff')",
     ]
     assert processes.bounded_output(command, limit=2, timeout=5) == b"\x00\xff"
+
+
+def test_owned_process_closes_all_pipes_after_buffered_stdin_breaks():
+    with processes.owned_process(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    ) as child:
+        # Keep this small write in BufferedWriter. Killing the child makes its
+        # implicit close-time flush fail with EPIPE on POSIX and Windows.
+        assert child.stdin.write(b"unflushed test-only input") == 25
+    assert child.poll() is not None
+    assert child.stdin.closed and child.stdout.closed and child.stderr.closed
+    wait_for_pid_exit(child.pid)
+    assert not psutil.pid_exists(child.pid)
+
+
+def test_pipe_cleanup_reports_other_errors_after_closing_remaining_owned_handles():
+    raw, output, error = io.BytesIO(), io.BytesIO(), io.BytesIO()
+
+    class FailedBufferedWriter:
+        def __init__(self):
+            self.raw = raw
+
+        def close(self):
+            raise OSError("Injected close-time I/O failure")
+
+    child = SimpleNamespace(stdin=FailedBufferedWriter(), stdout=output, stderr=error)
+    with pytest.raises(ExceptionGroup, match="pipe cleanup failed") as failure:
+        processes._close_process_pipes(child)
+    assert len(failure.value.exceptions) == 1
+    assert isinstance(failure.value.exceptions[0], OSError)
+    assert raw.closed and output.closed and error.closed
 
 
 def test_bounded_output_stops_on_small_overrun_before_timeout(tmp_path):

@@ -14,10 +14,11 @@ from campix.app import create_app
 from campix.config import Settings
 from campix.db import Database
 from campix.process_lock import ProcessLock
+from campix.processes import owned_process
 from campix.recording import Recorder
 
 from .conftest import signin
-from .test_service import wait_online
+from .test_service import wait_online, wait_packet_ready
 
 
 def test_restart_preserves_users_media_controls_and_schedules(tmp_path):
@@ -201,10 +202,11 @@ def test_cli_invalid_bootstrap_password_is_never_echoed(tmp_path):
 def test_duration_finalizes_with_real_preroll(client, application):
     signin(client)
     wait_online(client)
+    wait_packet_ready(client)
     camera = application.state.cameras.get("demo")
     time.sleep(0.6)
-    before = len(camera.preroll)
-    assert before >= 3
+    before = camera.encoded_hub.stats()["buffered_duration_seconds"]
+    assert before >= 0.2
     response = client.post("/api/v1/cameras/demo/recording", json={"duration": 1})
     assert response.status_code == 200, response.text
     deadline = time.monotonic() + 5
@@ -213,17 +215,38 @@ def test_duration_finalizes_with_real_preroll(client, application):
     ):
         time.sleep(0.05)
     item = client.get("/api/v1/media?kind=video").json()["items"][0]
-    assert item["duration"] >= before / camera.config.fps + 0.8
+    assert item["duration"] >= before + 0.7
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "json",
+            str(application.state.store.path(item["filename"])),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=10,
+    )
+    assert float(json.loads(result.stdout)["format"]["duration"]) == pytest.approx(
+        item["duration"], abs=0.2
+    )
 
 
 @pytest.mark.skipif(not shutil.which("ffmpeg"), reason="FFmpeg required")
 def test_encoder_failure_never_indexes_success(client, application, monkeypatch):
     signin(client)
     wait_online(client)
-    spawn = subprocess.Popen
+    wait_packet_ready(client)
     monkeypatch.setattr(
-        "campix.recording.subprocess.Popen",
-        lambda *args, **kwargs: spawn([sys.executable, "-c", "raise SystemExit(1)"], **kwargs),
+        "campix.recording.owned_process",
+        lambda *args, **kwargs: owned_process(
+            [sys.executable, "-c", "raise SystemExit(1)"], **kwargs
+        ),
     )
     response = client.post("/api/v1/cameras/demo/recording", json={})
     assert response.status_code == 200

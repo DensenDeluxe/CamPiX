@@ -130,9 +130,30 @@ def owned_process(command: list[str], **options) -> Iterator[subprocess.Popen]:
                     if sys.platform == "win32":
                         process._handle.Close()
                 finally:
-                    for stream in (process.stdin, process.stdout, process.stderr):
-                        if stream is not None:
-                            stream.close()
+                    _close_process_pipes(process)
+
+
+def _close_process_pipes(process: subprocess.Popen) -> None:
+    """Close every owned pipe even when a killed child's buffered stdin cannot flush."""
+    errors = []
+    for stream in (process.stdin, process.stdout, process.stderr):
+        if stream is None:
+            continue
+        try:
+            stream.close()
+        except Exception as exc:
+            if not isinstance(exc, BrokenPipeError):
+                errors.append(exc)
+            # BufferedWriter.close normally closes its raw handle even on EPIPE.
+            # Preserve ownership if another I/O error interrupted that cleanup.
+            raw = getattr(stream, "raw", None)
+            if raw is not None and not raw.closed:
+                try:
+                    raw.close()
+                except Exception as raw_error:
+                    errors.append(raw_error)
+    if errors:
+        raise ExceptionGroup("Child process pipe cleanup failed", errors)
 
 
 class _WindowsJob:

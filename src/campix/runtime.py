@@ -3,17 +3,22 @@ from __future__ import annotations
 import io
 import json
 import logging
+import os
+import queue
 import threading
 import time
 from collections import deque
+from concurrent.futures import Future, TimeoutError
 
 import numpy as np
 from PIL import Image
 
 from .capture import CaptureError, make_backend
-from .encoding import EncoderUnavailable, select_encoder
+from .encoded import AnnexBParser, EncodedHub, h264_dimensions
+from .encoding import EncoderSelection, EncoderUnavailable, select_encoder
 from .models import CameraConfig
-from .recording import Recorder, encoder_probe
+from .recording import EncodedRecorder, encoder_probe
+from .shared_encoder import SharedEncoder
 
 LOG = logging.getLogger(__name__)
 
@@ -25,6 +30,15 @@ class Camera:
         self.encoding_selection = None
         self.encoding_error = None
         self.encoding_ready = threading.Event()
+        self.backend_ready = threading.Event()
+        self.encoding_lock = threading.RLock()
+        self.encoded_hub = EncodedHub(max_seconds=config.preroll_seconds)
+        self.shared_encoder = None
+        self.native_disabled = False
+        self.native_retry_at = 0.0
+        self.native_fallback_reason = None
+        self.snapshot_requests = queue.Queue(maxsize=4)
+        self.stopping = False
         self.encoder_thread = threading.Thread(
             target=self._prepare_encoder, name=f"encoder-probe-{config.id}", daemon=True
         )
@@ -55,10 +69,76 @@ class Camera:
             self.capture_thread.start()
             self.motion_thread.start()
 
-    def prepare_encoding(self):
+    def prepare_encoding(self, *, require_backend=False):
+        self.require_encoding_backend = require_backend
         self.encoder_thread.start()
 
     def _prepare_encoder(self):
+        # Standalone preparation remains useful for diagnostics. Live cameras always
+        # wait for their actual source before choosing a compressed-input profile.
+        if not self.require_encoding_backend:
+            self._select_encoding()
+            self.encoding_ready.set()
+            return
+        while not self.halt.is_set():
+            if not self.backend_ready.wait(0.2):
+                continue
+            backend = self.backend
+            epoch = self.encoded_hub.epoch
+            try:
+                if backend.native_encoded:
+                    capabilities = backend.capabilities
+                    selection = EncoderSelection(
+                        codec=capabilities["encoder_implementation"],
+                        hardware=capabilities["native_encoder_hardware"],
+                        requested=self.config.encoder,
+                        output_args=(),
+                        probe_verified=False,
+                        zero_copy_raw_frames=capabilities["capture_to_encoder_zero_copy"],
+                        input_codec="h264",
+                    )
+                else:
+                    _, sample = self.frame(timeout=3)
+                    selection = self._select_encoding(sample, adopt=False)
+                with self.encoding_lock:
+                    if (
+                        self.halt.is_set()
+                        or backend is not self.backend
+                        or not self.backend_ready.is_set()
+                        or epoch != self.encoded_hub.epoch
+                    ):
+                        continue
+                    if selection:
+                        self.encoding_selection = selection
+                        self.encoding_error = None
+                        if not backend.native_encoded:
+                            self.shared_encoder = SharedEncoder(self, selection)
+                            self.shared_encoder.start()
+                    self.encoding_ready.set()
+            except CaptureError:
+                if self.halt.wait(0.2):
+                    break
+                continue
+            except EncoderUnavailable as exc:
+                with self.encoding_lock:
+                    if (
+                        not self.halt.is_set()
+                        and backend is self.backend
+                        and self.backend_ready.is_set()
+                        and epoch == self.encoded_hub.epoch
+                    ):
+                        self.encoding_error = str(exc)
+                        self.bus.publish(
+                            "encoding.unavailable", self.encoding_error, self.config.id
+                        )
+                        self.encoding_ready.set()
+            while (
+                not self.halt.wait(0.2) and backend is self.backend and self.backend_ready.is_set()
+            ):
+                pass
+        self.encoding_ready.set()
+
+    def _select_encoding(self, sample=None, *, adopt=True):
         try:
             selection = select_encoder(
                 self.settings.ffmpeg,
@@ -68,27 +148,98 @@ class Camera:
                 fps=self.config.fps,
                 capabilities=self.encoders,
                 cancel=self.halt,
+                input_codec="mjpeg" if sample is not None else None,
+                input_sample=sample,
             )
             with self.condition:
                 if self.halt.is_set():
                     return
-                self.encoding_selection = selection
+                if adopt:
+                    self.encoding_selection = selection
+                    self.encoding_error = None
+                return selection
         except EncoderUnavailable as exc:
+            if not adopt:
+                raise
             if not self.halt.is_set():
                 self.encoding_error = str(exc)
                 self.bus.publish("encoding.unavailable", self.encoding_error, self.config.id)
-        finally:
-            self.encoding_ready.set()
+
+    def _native_sink(self, backend, epoch):
+        parser, timestamps = AnnexBParser(), deque()
+        lock = threading.Lock()
+        sensor_origin = None
+        arrival_origin = None
+        validated_config = None
+
+        def offer(data, timestamp_us=None, keyframe=None, frame_complete=False):
+            nonlocal sensor_origin, arrival_origin, validated_config
+            with lock:
+                if (
+                    self.halt.is_set()
+                    or backend is not self.backend
+                    or epoch != self.encoded_hub.epoch
+                ):
+                    return
+                now = time.monotonic()
+                if timestamp_us is not None and data.startswith(
+                    (b"\x00\x00\x00\x01\x09", b"\x00\x00\x01\x09")
+                ):
+                    if sensor_origin is None:
+                        sensor_origin, arrival_origin = timestamp_us, now
+                    timestamps.append(arrival_origin + (timestamp_us - sensor_origin) / 1_000_000)
+                    if len(timestamps) > 240:
+                        raise CaptureError("Native encoder exceeded its timestamp bound")
+                packets = parser.feed(data)
+                if frame_complete:
+                    packets.extend(parser.end_access_unit())
+                for packet in packets:
+                    if packet.decoder_config != validated_config:
+                        if h264_dimensions(packet.decoder_config) != (
+                            self.config.width,
+                            self.config.height,
+                        ):
+                            raise CaptureError(
+                                "Native H.264 dimensions do not match the camera profile"
+                            )
+                        validated_config = packet.decoder_config
+                    captured = timestamps.popleft() if timestamps else now
+                    if captured > now + 2 or now - captured > 5:
+                        raise CaptureError("Native H.264 clock is outside the live capture window")
+                    self.encoded_hub.publish(packet, captured, epoch=epoch)
+
+        return offer
+
+    def _reset_encoding(self, backend):
+        with self.encoding_lock:
+            if backend is not self.backend:
+                return
+            self.backend_ready.clear()
+            if self.shared_encoder:
+                self.shared_encoder.stop()
+                if self.shared_encoder.thread.is_alive():
+                    raise CaptureError("Shared encoder worker did not stop")
+            if not self.halt.is_set():
+                self.encoding_selection = None
+                self.encoding_ready.clear()
+                self.encoded_hub.restart()
 
     def _capture(self):
-        self.prepare_encoding()
+        self.prepare_encoding(require_backend=True)
         failures = 0
         while not self.halt.is_set():
             backend = make_backend(self.config, self.settings.ffmpeg)
             self.backend = backend
+            backend.native_disabled = (
+                self.native_disabled and time.monotonic() < self.native_retry_at
+            )
+            backend.set_encoded_sink(self._native_sink(backend, self.encoded_hub.epoch))
             self.status = "connecting"
             try:
                 backend.open()
+                if backend.native_encoded:
+                    self.native_fallback_reason = None
+                self.backend_ready.set()
                 self.error = None
                 while not self.halt.is_set():
                     started = time.monotonic()
@@ -104,11 +255,21 @@ class Camera:
                         with Image.open(io.BytesIO(jpeg)) as encoded:
                             if encoded.format != "JPEG":
                                 raise CaptureError("Capture adapter returned an invalid JPEG")
-                            if encoded.size != (self.config.width, self.config.height):
+                            expected = (
+                                tuple(backend.preview_size)
+                                if backend.native_encoded
+                                else (self.config.width, self.config.height)
+                            )
+                            if encoded.size != expected:
                                 image = encoded.convert("RGB")
                     if image is not None:
-                        if image.size != (self.config.width, self.config.height):
-                            image = image.resize((self.config.width, self.config.height))
+                        expected = (
+                            tuple(backend.preview_size)
+                            if backend.native_encoded
+                            else (self.config.width, self.config.height)
+                        )
+                        if image.size != expected:
+                            image = image.resize(expected)
                         preview = io.BytesIO()
                         image.save(preview, "JPEG", quality=self.config.quality)
                         jpeg = preview.getvalue()
@@ -141,14 +302,15 @@ class Camera:
                         ):
                             _, old = self.preroll.popleft()
                             self.preroll_bytes -= len(old)
-                        if self.recorder:
-                            self.recorder.offer(jpeg)
                         self.condition.notify_all()
+                    self._save_snapshots(backend, jpeg)
                     failures = 0
                     # JPEG pipe adapters already sample at the profile rate and block
                     # for their next arrival; a second timer can discard that cadence.
                     if not native_jpeg:
-                        self.halt.wait(max(0, 1 / self.config.fps - (time.monotonic() - started)))
+                        self._pace_capture(
+                            max(0, 1 / self.config.fps - (time.monotonic() - started))
+                        )
             except Exception as exc:
                 if self.halt.is_set():
                     break
@@ -157,6 +319,18 @@ class Camera:
                 self.bus.publish("camera.error", self.error, self.config.id)
                 LOG.warning("Camera %s capture failed: %s", self.config.id, type(exc).__name__)
                 failures += 1
+                if backend.native_attempted:
+                    self.native_disabled = True
+                    self.native_retry_at = time.monotonic() + 30
+                    self.native_fallback_reason = (
+                        "Native compressed capture failed; using JPEG capture"
+                    )
+                    self.bus.publish(
+                        "encoding.fallback",
+                        "Native capture failed; retrying the JPEG capture path",
+                        self.config.id,
+                    )
+                self._fail_snapshots()
                 with self.condition:
                     self.jpeg, self.analysis = None, None
                     self.preroll.clear()
@@ -169,8 +343,28 @@ class Camera:
                     backend.close()
                 except Exception:
                     LOG.warning("Camera %s close failed", self.config.id)
+                try:
+                    self._reset_encoding(backend)
+                except CaptureError as exc:
+                    self.status, self.error = "error", str(exc)
+                    self.bus.publish("camera.stop_failed", self.error, self.config.id)
+                    return
             self.halt.wait(min(30, 2 ** min(failures, 5)))
         self.status = "stopped"
+
+    def _pace_capture(self, delay):
+        if os.name != "nt" or delay >= 0.05:
+            self.halt.wait(delay)
+            return
+        # Windows Event.wait rounds short waits to the scheduler tick. Python's
+        # high-resolution sleep avoids halving a 60 FPS source's cadence, while
+        # these small intervals retain bounded shutdown cancellation.
+        deadline = time.perf_counter() + delay
+        while not self.halt.is_set():
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0:
+                return
+            time.sleep(min(remaining, 0.005))
 
     def _motion_gray(self, jpeg):
         with Image.open(io.BytesIO(jpeg)) as image:
@@ -248,6 +442,10 @@ class Camera:
                 self.halt.wait(2)
 
     def frame(self, sequence=None, timeout=10):
+        current, jpeg, _ = self.frame_packet(sequence, timeout)
+        return current, jpeg
+
+    def frame_packet(self, sequence=None, timeout=10):
         with self.condition:
             self.condition.wait_for(
                 lambda: (
@@ -258,20 +456,75 @@ class Camera:
                 timeout=timeout,
             )
             if (
-                self.jpeg is None
+                self.halt.is_set()
+                or self.stopping
+                or self.jpeg is None
                 or self.status != "online"
                 or not self.frame_times
                 or time.monotonic() - self.frame_times[-1] > 5
             ):
                 raise CaptureError("No current frame available")
-            return self.sequence, self.jpeg
+            return self.sequence, self.jpeg, self.frame_times[-1]
+
+    def _save_snapshots(self, backend, jpeg):
+        while True:
+            try:
+                request = self.snapshot_requests.get_nowait()
+            except queue.Empty:
+                return
+            if not request.set_running_or_notify_cancel():
+                continue
+            try:
+                photo = backend.snapshot_jpeg()
+                if photo is None:
+                    if backend.native_encoded:
+                        raise CaptureError("A full-resolution camera photo is unavailable")
+                    photo = jpeg
+                if len(photo) > 16 * 1024 * 1024:
+                    raise CaptureError("Camera photo exceeds the supported size")
+                with Image.open(io.BytesIO(photo)) as image:
+                    if image.format != "JPEG" or image.size != (
+                        self.config.width,
+                        self.config.height,
+                    ):
+                        raise CaptureError("Camera photo does not match its capture profile")
+                    image.load()
+                request.set_result(photo)
+            except Exception as exc:
+                request.set_exception(
+                    CaptureError(f"Camera photo unavailable ({type(exc).__name__})")
+                )
+
+    def _fail_snapshots(self):
+        while True:
+            try:
+                request = self.snapshot_requests.get_nowait()
+            except queue.Empty:
+                return
+            if request.set_running_or_notify_cancel():
+                request.set_exception(CaptureError("Camera is unavailable"))
 
     def snapshot(self, trigger="manual"):
-        _, jpeg = self.frame()
+        self.frame()
+        request = Future()
+        with self.operation_lock:
+            if self.halt.is_set() or self.stopping:
+                raise CaptureError("Camera is stopping")
+            try:
+                self.snapshot_requests.put_nowait(request)
+            except queue.Full:
+                raise CaptureError("Camera photo queue is full; retry shortly") from None
+        try:
+            jpeg = request.result(timeout=8)
+        except TimeoutError:
+            request.cancel()
+            raise CaptureError("Camera photo did not arrive in time") from None
         return self.store.snapshot(self.config.id, jpeg, trigger)
 
     def start_recording(self, duration=None, trigger="manual"):
         with self.operation_lock:
+            if self.stopping:
+                raise CaptureError("Camera is stopping")
             if self.recorder:
                 raise CaptureError("A recording is already in progress")
             self.frame()
@@ -282,17 +535,24 @@ class Camera:
                 raise CaptureError(
                     self.encoding_error or "No usable H.264 encoder for this profile"
                 )
+            stats = self.encoded_hub.stats()
+            if (
+                not stats["ready"]
+                or stats["last_frame_age_seconds"] is None
+                or stats["last_frame_age_seconds"] > 5
+            ):
+                raise CaptureError("Shared H.264 stream is still preparing; retry shortly")
             encoder = selection.codec
+            recorder = EncodedRecorder(
+                self.config,
+                self.settings,
+                self.store,
+                self.encoded_hub,
+                trigger,
+                duration,
+                selection=selection,
+            )
             with self.condition:
-                recorder = Recorder(
-                    self.config,
-                    self.settings,
-                    self.store,
-                    [f for _, f in self.preroll],
-                    trigger,
-                    duration,
-                    selection=selection,
-                )
                 self.recorder = recorder
             self.bus.publish(
                 "recording.started",
@@ -324,6 +584,18 @@ class Camera:
             times = list(self.frame_times)
             recorder = self.recorder
             frame_age = time.monotonic() - times[-1] if times else None
+            encoded = self.encoded_hub.stats()
+            packet_ready = bool(
+                encoded["ready"]
+                and encoded["last_frame_age_seconds"] is not None
+                and encoded["last_frame_age_seconds"] < 5
+            )
+            native = bool(self.backend and self.backend.native_encoded)
+            preview_fps = (
+                round((len(times) - 1) / (times[-1] - times[0]), 2)
+                if len(times) > 1 and times[-1] > times[0] and frame_age < 5
+                else 0
+            )
             info = {
                 "id": self.config.id,
                 "name": self.config.name,
@@ -333,9 +605,15 @@ class Camera:
                 "width": self.config.width,
                 "height": self.config.height,
                 "fps_target": self.config.fps,
-                "fps": round((len(times) - 1) / (times[-1] - times[0]), 2)
-                if len(times) > 1 and times[-1] > times[0] and frame_age < 5
-                else 0,
+                "fps": round(encoded["fps"], 2)
+                if native
+                and encoded["last_frame_age_seconds"] is not None
+                and encoded["last_frame_age_seconds"] < 5
+                else (0 if native else preview_fps),
+                "preview_fps": preview_fps,
+                "preview_size": list(self.backend.preview_size)
+                if native
+                else [self.config.width, self.config.height],
                 "frame_age_seconds": round(frame_age, 2) if frame_age is not None else None,
                 "recording": bool(recorder and not recorder.done.is_set()),
                 "dropped_frames": recorder.dropped if recorder else 0,
@@ -360,7 +638,34 @@ class Camera:
                     "selected_hardware": bool(
                         self.encoding_selection and self.encoding_selection.hardware
                     ),
-                    "profile_tested": bool(self.encoding_selection),
+                    "profile_tested": bool(
+                        self.encoding_selection
+                        and (self.encoding_selection.probe_verified or encoded["ready"])
+                    ),
+                    "shared": True,
+                    "packet_ready": packet_ready,
+                    "packet_stream": encoded,
+                    "source": self.backend.capabilities.get("encoded_source", "shared-ffmpeg")
+                    if self.backend
+                    else None,
+                    "zero_copy_raw_frames": bool(
+                        self.encoding_selection and self.encoding_selection.zero_copy_raw_frames
+                    ),
+                    "zero_copy_scope": self.backend.capabilities.get("zero_copy_scope")
+                    if native
+                    else (
+                        "hardware-decoder-to-encoder"
+                        if self.encoding_selection and self.encoding_selection.zero_copy_raw_frames
+                        else None
+                    ),
+                    "zero_copy_reason": self.encoding_selection.zero_copy_reason
+                    if self.encoding_selection
+                    else None,
+                    "native_fallback_reason": self.native_fallback_reason,
+                    "encoder_sessions_started": self.shared_encoder.sessions_started
+                    if self.shared_encoder
+                    else (1 if native else 0),
+                    "runtime_error": self.shared_encoder.error if self.shared_encoder else None,
                     "fallback_reason": self.encoding_selection.fallback_reason
                     if self.encoding_selection
                     else None,
@@ -371,7 +676,15 @@ class Camera:
         return info
 
     def stop(self):
-        self.halt.set()
+        with self.operation_lock:
+            self.stopping = True
+            if self.recorder:
+                try:
+                    self.stop_recording()
+                except RuntimeError:
+                    pass
+            self.halt.set()
+        self._fail_snapshots()
         with self.condition:
             self.condition.notify_all()
         if self.backend:
@@ -385,11 +698,9 @@ class Camera:
             self.motion_thread.join(timeout=30)
         if self.encoder_thread.is_alive():
             self.encoder_thread.join(timeout=15)
-        if self.recorder:
-            try:
-                self.stop_recording()
-            except RuntimeError:
-                pass
+        if self.shared_encoder:
+            self.shared_encoder.stop()
+        self.encoded_hub.close()
 
 
 class CameraManager:
@@ -447,6 +758,12 @@ class CameraManager:
             camera.capture_thread.is_alive()
             or camera.motion_thread.is_alive()
             or camera.encoder_thread.is_alive()
+            or camera.shared_encoder
+            and (
+                camera.shared_encoder.thread.is_alive()
+                or camera.shared_encoder.reader_thread
+                and camera.shared_encoder.reader_thread.is_alive()
+            )
         ):
             message = "Camera worker did not stop; retry after the driver releases the device"
             camera.status, camera.error = "error", message

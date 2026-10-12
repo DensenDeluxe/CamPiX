@@ -6,6 +6,8 @@ They do not qualify a physical camera, sustained throughput, or a deployment.
 
 from __future__ import annotations
 
+import hashlib
+import io
 import os
 import re
 import shutil
@@ -16,10 +18,12 @@ import threading
 import time
 from collections import OrderedDict
 from collections.abc import Collection
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from itertools import islice
 from pathlib import Path
 from typing import Any
+
+from PIL import Image
 
 from .processes import _output_reader, owned_process
 
@@ -38,6 +42,7 @@ PROBE_MEDIA_LIMIT = 2 * 1024 * 1024
 PROBE_CACHE_LIMIT = 128
 PROBE_SUCCESS_TTL_SECONDS = 300.0
 PROBE_FAILURE_TTL_SECONDS = 30.0
+PROBE_INPUT_LIMIT = 16 * 1024 * 1024
 
 
 class EncoderUnavailable(RuntimeError):
@@ -62,6 +67,9 @@ class EncoderSelection:
     fallback_reason: str | None = None
     probe_verified: bool = True
     hardware_verified: bool = False
+    input_codec: str | None = None
+    zero_copy_raw_frames: bool = False
+    zero_copy_reason: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -157,6 +165,8 @@ def encoder_args(
                 "0",
                 "-zerolatency",
                 "1",
+                "-delay",
+                "0",
                 "-forced-idr",
                 "1",
             ]
@@ -364,6 +374,234 @@ def _smoke(
         return _ProbeResult(codec, False, "probe-canceled", device)
 
 
+def _jpeg_probe_sample(sample: bytes | None, width: int, height: int) -> bytes:
+    """Check bounded JPEG headers without decoding pixels or trusting camera metadata."""
+    if sample is None:
+        image = Image.new("RGB", (width, height), (16, 32, 48))
+        with io.BytesIO() as stream:
+            image.save(stream, format="JPEG", subsampling=2)
+            sample = stream.getvalue()
+        image.close()
+    if not isinstance(sample, bytes) or not 4 <= len(sample) <= PROBE_INPUT_LIMIT:
+        raise ValueError("jpeg-input-size-invalid")
+    if not sample.startswith(b"\xff\xd8") or not sample.endswith(b"\xff\xd9"):
+        raise ValueError("jpeg-input-invalid")
+    offset = 2
+    while offset + 4 <= len(sample):
+        if sample[offset] != 0xFF:
+            raise ValueError("jpeg-input-invalid")
+        while offset < len(sample) and sample[offset] == 0xFF:
+            offset += 1
+        if offset >= len(sample):
+            break
+        marker = sample[offset]
+        offset += 1
+        if marker == 0xDA:
+            break
+        if marker in {0x01, 0xD8, 0xD9, *range(0xD0, 0xD8)}:
+            continue
+        if offset + 2 > len(sample):
+            break
+        length = int.from_bytes(sample[offset : offset + 2], "big")
+        if length < 2 or offset + length > len(sample):
+            raise ValueError("jpeg-input-invalid")
+        if marker in {0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF}:
+            header = sample[offset + 2 : offset + length]
+            if marker != 0xC0 or len(header) != 15 or header[0] != 8 or header[5] != 3:
+                raise ValueError("jpeg-format-unsupported")
+            actual_height = int.from_bytes(header[1:3], "big")
+            actual_width = int.from_bytes(header[3:5], "big")
+            if (actual_width, actual_height) != (width, height):
+                raise ValueError("jpeg-profile-mismatch")
+            # NVDEC can stall on unsupported chroma; never initialize it for those frames.
+            if (header[7], header[10], header[13]) != (0x22, 0x11, 0x11):
+                raise ValueError("jpeg-chroma-unsupported")
+            return sample
+        offset += length
+    raise ValueError("jpeg-input-invalid")
+
+
+def _zero_copy_args(
+    codec: str, width: int, height: int, fps: int, *, device: str | None
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Allow only decoder/encoder pairs sharing hardware frames, with strict pixel formats."""
+    inputs, outputs = encoder_args(codec, width, height, fps, device=device)
+    if codec == "h264_nvenc":
+        inputs += (
+            "-hwaccel",
+            "cuda",
+            "-hwaccel_output_format",
+            "cuda",
+            "-c:v",
+            "mjpeg_cuvid",
+            "-flags",
+            "+low_delay",
+            "-threads",
+            "1",
+        )
+        pixel_format = "cuda"
+    elif codec == "h264_qsv":
+        inputs += (
+            "-hwaccel",
+            "qsv",
+            "-hwaccel_output_format",
+            "qsv",
+            "-hwaccel_device",
+            "campix",
+            "-c:v",
+            "mjpeg_qsv",
+        )
+        pixel_format = "qsv"
+    elif codec == "h264_vaapi":
+        inputs += ("-hwaccel", "vaapi", "-hwaccel_output_format", "vaapi")
+        pixel_format = "vaapi"
+    else:
+        raise ValueError("hardware-frame-path-unsupported")
+    # Upload, software conversion and implicit filters invalidate the zero-copy boundary.
+    cleaned: list[str] = []
+    for key, value in zip(outputs[::2], outputs[1::2], strict=True):
+        if key not in {"-pix_fmt", "-vf"}:
+            cleaned.extend((key, value))
+    cleaned.extend(("-noautoscale", "-pix_fmt", f"+{pixel_format}"))
+    return inputs, tuple(cleaned)
+
+
+def _smoke_zero_copy(
+    ffmpeg: str,
+    codec: str,
+    width: int,
+    height: int,
+    fps: int,
+    *,
+    sample: bytes,
+    device: str | None,
+    timeout: float,
+    cancel: threading.Event | None,
+) -> _ProbeResult:
+    inputs, outputs = _zero_copy_args(codec, width, height, fps, device=device)
+    try:
+        with tempfile.TemporaryDirectory(prefix="campix-hardware-frames-") as directory:
+            Path(directory).chmod(0o700)
+            source = Path(directory) / "input.mjpeg"
+            path = Path(directory) / "output.h264"
+            # Four bounded compressed packets, not a CPU-decoded raw video input.
+            with source.open("wb") as stream:
+                for _ in range(4):
+                    stream.write(sample)
+            command = [
+                ffmpeg,
+                "-nostdin",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                *inputs,
+                "-f",
+                "mjpeg",
+                "-framerate",
+                str(fps),
+                "-i",
+                str(source),
+                "-an",
+                "-frames:v",
+                "4",
+                "-fps_mode",
+                "passthrough",
+                *outputs,
+                "-fs",
+                str(PROBE_MEDIA_LIMIT),
+                "-f",
+                "h264",
+                str(path),
+            ]
+            code, _ = _run_bounded(command, timeout=timeout, media_path=path, cancel=cancel)
+            if code != 0:
+                return _ProbeResult(codec, False, "hardware-frame-encode-failed", device)
+            if not path.exists() or not 0 < path.stat().st_size <= PROBE_MEDIA_LIMIT:
+                return _ProbeResult(codec, False, "no-encoded-packets", device)
+            with path.open("rb") as stream:
+                packets = stream.read(PROBE_MEDIA_LIMIT + 1)
+            if not _has_h264_packets(packets):
+                return _ProbeResult(codec, False, "invalid-h264-packets", device)
+            return _ProbeResult(codec, True, device=device)
+    except subprocess.TimeoutExpired:
+        return _ProbeResult(codec, False, "probe-timed-out", device)
+    except _OutputLimit:
+        return _ProbeResult(codec, False, "probe-output-limit", device)
+    except OSError:
+        return _ProbeResult(codec, False, "probe-process-failed", device)
+    except _ProbeCancelled:
+        return _ProbeResult(codec, False, "probe-canceled", device)
+
+
+def _probe_zero_copy(
+    ffmpeg: str,
+    identity: tuple[Any, ...],
+    codec: str,
+    width: int,
+    height: int,
+    fps: int,
+    *,
+    sample: bytes | None,
+    device: str | None,
+    platform: str,
+    deadline: float,
+    cancel: threading.Event | None,
+) -> _ProbeResult:
+    if cancel is not None and cancel.is_set():
+        return _ProbeResult(codec, False, "probe-canceled", device)
+    if codec not in {"h264_nvenc", "h264_qsv", "h264_vaapi"}:
+        return _ProbeResult(codec, False, "hardware-frame-path-unsupported", device)
+    try:
+        sample = _jpeg_probe_sample(sample, width, height)
+    except ValueError as error:
+        return _ProbeResult(codec, False, str(error), device)
+    key = (
+        *identity,
+        platform,
+        codec,
+        width,
+        height,
+        fps,
+        "mjpeg-hardware-frames",
+        device,
+        hashlib.sha256(sample).digest(),
+    )
+    cached = _cached(key)
+    if cached is not None:
+        return cached
+    while True:
+        if cancel is not None and cancel.is_set():
+            return _ProbeResult(codec, False, "probe-canceled", device)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return _ProbeResult(codec, False, "probe-budget-exhausted", device)
+        if _probe_slots.acquire(timeout=min(0.02, remaining)):
+            break
+    try:
+        cached = _cached(key)
+        if cached is not None:
+            return cached
+        remaining = min(PROBE_TIMEOUT_SECONDS, deadline - time.monotonic())
+        if remaining <= 0:
+            return _ProbeResult(codec, False, "probe-budget-exhausted", device)
+        result = _smoke_zero_copy(
+            ffmpeg,
+            codec,
+            width,
+            height,
+            fps,
+            sample=sample,
+            device=device,
+            timeout=remaining,
+            cancel=cancel,
+        )
+        if result.reason == "probe-canceled":
+            return result
+        return _remember(key, result)
+    finally:
+        _probe_slots.release()
+
+
 def _probe_encoder(
     ffmpeg: str,
     identity: tuple[Any, ...],
@@ -524,13 +762,20 @@ def select_encoder(
     excluded: Collection[str] = (),
     budget: float = 12,
     cancel: threading.Event | None = None,
+    input_codec: str | None = None,
+    input_sample: bytes | None = None,
+    zero_copy: bool = True,
 ) -> EncoderSelection:
-    """Choose an actually usable profile; explicit codec choices never silently change."""
+    """Choose a tested encoder and, optionally, a tested compressed hardware-frame path."""
     _profile(width, height, fps)
     if requested not in {"auto", *ENCODER_NAMES}:
         raise EncoderUnavailable("Unsupported H.264 encoder")
     if not 0 < budget <= 60:
         raise ValueError("Encoder selection budget must be between 0 and 60 seconds")
+    if input_codec not in {None, "mjpeg"}:
+        raise ValueError("Unsupported encoder input codec")
+    if type(zero_copy) is not bool:
+        raise ValueError("Zero-copy preference must be boolean")
     platform = sys.platform if platform is None else platform
     binary = _binary(ffmpeg)
     if binary is None:
@@ -586,14 +831,49 @@ def select_encoder(
         reason = None
         if requested == "auto" and failures:
             reason = "; ".join(failures) + f"; selected tested {codec}"
-        return EncoderSelection(
+        selection = EncoderSelection(
             codec=codec,
             hardware=codec in ENCODER_HARDWARE_NAMES,
             requested=requested,
             input_args=inputs,
             output_args=outputs,
             fallback_reason=reason,
+            input_codec=input_codec,
         )
+        if input_codec == "mjpeg" and zero_copy:
+            frames = _probe_zero_copy(
+                resolved,
+                identity,
+                codec,
+                width,
+                height,
+                fps,
+                sample=input_sample,
+                device=result.device,
+                platform=platform,
+                deadline=deadline,
+                cancel=cancel,
+            )
+            if frames.reason == "probe-canceled":
+                raise EncoderUnavailable("Encoder selection canceled")
+            if frames.usable:
+                frame_inputs, frame_outputs = _zero_copy_args(
+                    codec,
+                    width,
+                    height,
+                    fps,
+                    device=result.device,
+                )
+                return replace(
+                    selection,
+                    input_args=frame_inputs,
+                    output_args=frame_outputs,
+                    zero_copy_raw_frames=True,
+                )
+            selection = replace(selection, zero_copy_reason=frames.reason)
+        elif input_codec == "mjpeg":
+            selection = replace(selection, zero_copy_reason="hardware-frame-path-disabled")
+        return selection
     profile = f"{width}x{height} at {fps} FPS"
     detail = "; ".join(failures)
     raise EncoderUnavailable(f"No usable H.264 encoder for {profile} ({detail})")

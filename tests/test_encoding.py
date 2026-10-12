@@ -60,6 +60,7 @@ def test_nvenc_4k60_uses_low_latency_rate_control_without_a_low_level_cap():
     assert options["-tune"] == "ull"
     assert options["-bf"] == "0"
     assert options["-rc-lookahead"] == "0"
+    assert options["-delay"] == "0"
     assert options["-g"] == "60"
     assert options["-b:v"] == "49766400"
     assert "-level" not in options

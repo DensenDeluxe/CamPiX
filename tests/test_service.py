@@ -28,6 +28,20 @@ def wait_online(client):
     raise AssertionError("Synthetic camera did not deliver frames")
 
 
+def wait_packet_ready(client):
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        response = client.get("/api/v1/cameras")
+        if (
+            response.status_code == 200
+            and response.json()
+            and response.json()[0]["encoding"]["packet_ready"]
+        ):
+            return response.json()[0]
+        time.sleep(0.05)
+    raise AssertionError("Camera did not produce a configured H.264 keyframe")
+
+
 def test_health_identifies_the_responding_service_process(client):
     response = client.get("/healthz")
     assert response.status_code == 200
@@ -82,6 +96,7 @@ def test_snapshot_media_lock_delete_and_path_boundary(client):
 def test_recording_produces_playable_h264_and_rejects_overlap(client, application):
     signin(client)
     wait_online(client)
+    wait_packet_ready(client)
     assert client.post("/api/v1/cameras/demo/recording", json={}).status_code == 200
     assert client.post("/api/v1/cameras/demo/recording", json={}).status_code == 409
     time.sleep(0.6)

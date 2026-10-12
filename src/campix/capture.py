@@ -7,12 +7,13 @@ import shutil
 import subprocess
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageEnhance
 
 from .models import CameraConfig, ControlPatch
-from .processes import NO_WINDOW, bounded_output
+from .processes import NO_WINDOW, _output_reader, bounded_output, owned_process
 
 DSHOW_MODE = re.compile(
     r"(?:(?P<format_type>pixel_format|vcodec)=(?P<format>\w+)\s+)?"
@@ -26,12 +27,53 @@ class CaptureError(RuntimeError):
     pass
 
 
+def preview_size(width: int, height: int) -> tuple[int, int]:
+    """Bound native preview work while keeping even, aspect-preserving dimensions."""
+    ratio = min(1.0, 640 / width, 480 / height)
+    return max(2, int(width * ratio) // 2 * 2), max(2, int(height * ratio) // 2 * 2)
+
+
+def native_rate_matches(actual: float, requested: int) -> bool:
+    """Match reported nominal or NTSC rates without inventing a device frame rate."""
+    return math.isclose(actual, requested, rel_tol=0, abs_tol=0.0001) or (
+        requested in (24, 30, 60)
+        and math.isclose(actual, requested * 1000 / 1001, rel_tol=0, abs_tol=0.002)
+    )
+
+
+def _bounded_stdout(command: list[str], *, limit: int, timeout: float) -> bytes:
+    """Read device diagnostics written to stdout without unbounded buffering."""
+    output = bytearray()
+    with owned_process(
+        command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+    ) as process:
+        read = _output_reader(process.stdout.fileno())
+        deadline = time.monotonic() + timeout
+        while True:
+            chunk = read(min(8192, max(1, limit + 1 - len(output))))
+            if chunk:
+                output.extend(chunk)
+                if len(output) > limit:
+                    raise ValueError("Device listing exceeds its supported size")
+            elif process.poll() is not None:
+                return bytes(output)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(command, timeout)
+            if not chunk:
+                time.sleep(min(0.01, remaining))
+
+
 class Backend:
     def __init__(self, config: CameraConfig, ffmpeg="ffmpeg"):
         self.config = config
         self.ffmpeg = ffmpeg
         self.lock = threading.RLock()
         self.controls = dict(config.controls)
+        self.encoded_sink: Callable[..., None] | None = None
+        self.native_encoded = False
+        self.native_attempted = False
+        self.native_disabled = False
         self.capabilities = {
             "backend": config.backend,
             "model": config.backend,
@@ -48,6 +90,14 @@ class Backend:
 
     def read_jpeg(self) -> bytes | None:
         """Return an already encoded frame when the capture adapter supplies JPEG."""
+        return None
+
+    def set_encoded_sink(self, sink: Callable[..., None]) -> None:
+        """Attach the service's bounded H.264 sink before opening this sole camera owner."""
+        self.encoded_sink = sink
+
+    def snapshot_jpeg(self) -> bytes | None:
+        """Optional full-resolution photo, called exclusively by the capture worker."""
         return None
 
     def apply(self, values):
@@ -103,13 +153,35 @@ class SyntheticBackend(Backend):
 
 
 class PicameraBackend(Backend):
+    def __init__(self, config, ffmpeg="ffmpeg"):
+        super().__init__(config, ffmpeg)
+        self.closed = threading.Event()
+        self.native_error = None
+        self.encoder = None
+        self.output = None
+        self.next_preview = 0.0
+        self.cleanup_lock = threading.Lock()
+        self.cleanup_done = False
+        self.encoder_started = False
+
     def open(self):
         from picamera2 import Picamera2
 
-        self.cam = Picamera2(int(self.config.source))
+        with self.cleanup_lock:
+            if self.closed.is_set():
+                raise CaptureError("Picamera2 camera is closed")
+            self.cam = Picamera2(int(self.config.source))
         try:
+            native = bool(
+                self.encoded_sink and self.config.encoder == "auto" and not self.native_disabled
+            )
+            self.preview_size = preview_size(self.config.width, self.config.height)
             config = self.cam.create_video_configuration(
-                main={"size": (self.config.width, self.config.height), "format": "RGB888"},
+                main={
+                    "size": (self.config.width, self.config.height),
+                    "format": "YUV420" if native else "RGB888",
+                },
+                **({"lores": {"size": self.preview_size, "format": "YUV420"}} if native else {}),
                 controls={"FrameRate": self.config.fps},
                 buffer_count=4,
             )
@@ -130,16 +202,107 @@ class PicameraBackend(Backend):
                 native_controls=sorted(available),
                 native_h264_candidate=True,
             )
+            if native:
+                self._start_native()
             self.cam.start()
+            if self.closed.is_set():
+                raise CaptureError("Picamera2 camera is closed")
             if self.controls:
                 self.apply(self.controls)
         except BaseException:
-            self.cam.close()
+            self.close()
             raise
+
+    def _start_native(self):
+        self.native_attempted = True
+        from picamera2.encoders import H264Encoder
+        from picamera2.encoders.v4l2_encoder import V4L2Encoder
+        from picamera2.outputs import Output
+
+        owner = self
+
+        class EncodedOutput(Output):
+            def outputframe(self, frame, keyframe=True, timestamp=None, packet=None, audio=False):
+                if not self.recording or owner.closed.is_set() or audio or owner.native_error:
+                    return
+                try:
+                    if len(frame) > 16 * 1024 * 1024:
+                        raise CaptureError("Native encoder frame exceeds the supported size")
+                    # Picamera2 callbacks already delimit frames. Its hardware encoder
+                    # does not require AUD NALs, while the shared parser does.
+                    framed = b"\x00\x00\x00\x01\x09\xf0" + bytes(frame)
+                    for offset in range(0, len(framed), 65536):
+                        owner.encoded_sink(
+                            framed[offset : offset + 65536],
+                            timestamp_us=timestamp,
+                            keyframe=keyframe,
+                            frame_complete=offset + 65536 >= len(framed),
+                        )
+                except Exception:
+                    # Never unwind into Picamera2's encoder thread or log camera data.
+                    owner.native_error = "Native camera encoder output failed"
+
+        self.encoder = H264Encoder(
+            repeat=True, iperiod=self.config.fps, framerate=self.config.fps, profile="baseline"
+        )
+        hardware = isinstance(self.encoder, V4L2Encoder)
+        self.output = EncodedOutput()
+        with self.cleanup_lock:
+            if self.closed.is_set():
+                raise CaptureError("Picamera2 camera is closed")
+            self.cam.start_encoder(self.encoder, self.output, name="main")
+            self.encoder_started = True
+            self.native_encoded = True
+        self.cam.options["quality"] = self.config.quality
+        self.capabilities.update(
+            native_encoded=True,
+            encoded_source="picamera2-h264",
+            encoder_implementation="picamera2-v4l2" if hardware else "picamera2-libx264",
+            native_encoder_hardware=hardware,
+            # Only the VC4 V4L2 encoder imports the camera's raw frame fd directly.
+            # Encoded H.264 bytes, preview JPEGs and media containers still live in RAM.
+            capture_to_encoder_zero_copy=hardware,
+            zero_copy_scope="camera-dmabuf-to-v4l2-encoder" if hardware else None,
+            preview_size=list(self.preview_size),
+            preview_fps=min(self.config.fps, 10),
+        )
+
+    def read_jpeg(self):
+        if not self.native_encoded:
+            return None
+        if self.native_error:
+            raise CaptureError(self.native_error)
+        if self.closed.wait(max(0.0, self.next_preview - time.monotonic())):
+            raise CaptureError("Picamera2 camera is closed")
+        request = self.cam.capture_request(wait=5.0)
+        try:
+            received = time.monotonic()
+            buffer = io.BytesIO()
+            request.save("lores", buffer, format="jpeg")
+            self.frame_received_at = received
+            self.next_preview = received + 1 / min(self.config.fps, 10)
+            if self.native_error:
+                raise CaptureError(self.native_error)
+            return buffer.getvalue()
+        finally:
+            request.release()
 
     def read(self):
         with self.lock:
             return self.cam.capture_image("main").convert("RGB")
+
+    def snapshot_jpeg(self):
+        if not self.native_encoded:
+            return None
+        if self.closed.is_set() or self.native_error:
+            raise CaptureError(self.native_error or "Picamera2 camera is closed")
+        request = self.cam.capture_request(wait=5.0)
+        try:
+            buffer = io.BytesIO()
+            request.save("main", buffer, format="jpeg")
+            return buffer.getvalue()
+        finally:
+            request.release()
 
     def apply(self, values):
         with self.lock:
@@ -165,16 +328,84 @@ class PicameraBackend(Backend):
             self.controls.update(values)
 
     def close(self):
-        if hasattr(self, "cam"):
+        self.closed.set()
+        if self.output:
+            self.output.stop()
+        with self.cleanup_lock:
+            if not hasattr(self, "cam") or self.cleanup_done:
+                return
+            self.cleanup_done = True
             # Do not wait on the read lock: closing the camera unblocks a stuck capture.
             try:
                 self.cam.stop()
             finally:
-                self.cam.close()
+                try:
+                    if self.encoder_started:
+                        self.cam.stop_encoder(self.encoder)
+                    elif self.encoder is not None and getattr(self.encoder, "running", False):
+                        # A start failure occurs before Picamera2 registers the encoder.
+                        self.encoder.stop()
+                finally:
+                    try:
+                        if self.encoder is not None:
+                            device = getattr(self.encoder, "vd", None)
+                            if device is not None:
+                                device.close()
+                    finally:
+                        self.cam.close()
 
 
 class V4L2Backend(Backend):
+    def __init__(self, config, ffmpeg="ffmpeg"):
+        super().__init__(config, ffmpeg)
+        self.closed = threading.Event()
+        self.pipe = None
+
     def open(self):
+        if self.closed.is_set():
+            raise CaptureError("V4L2 camera is closed")
+        candidate = V4L2CompressedBackend(self.config, self.ffmpeg)
+        candidate.encoded_sink = self.encoded_sink
+        candidate.native_disabled = self.native_disabled
+        modes = candidate.native_modes()
+        exact = [
+            p
+            for p in candidate.native_profiles
+            if p["size"] == (self.config.width, self.config.height)
+            and (
+                p["min_fps"] <= self.config.fps <= p["max_fps"]
+                or (
+                    native_rate_matches(p["min_fps"], self.config.fps)
+                    and native_rate_matches(p["max_fps"], self.config.fps)
+                )
+            )
+            and (
+                p["format"] == "mjpeg"
+                or (
+                    p["format"] == "h264"
+                    and self.config.encoder == "auto"
+                    and self.encoded_sink
+                    and not self.native_disabled
+                )
+            )
+        ]
+        if modes and exact:
+            candidate.listed_modes = modes
+            self.pipe = candidate
+            if self.closed.is_set():
+                raise CaptureError("V4L2 camera is closed")
+            try:
+                candidate.open()
+            finally:
+                self.native_attempted = candidate.native_attempted
+            self.native_encoded = candidate.native_encoded
+            self.preview_size = getattr(candidate, "preview_size", None)
+            self.capabilities.update(candidate.capabilities)
+        else:
+            self._open_opencv()
+        self._load_controls()
+
+    def _open_opencv(self):
         import cv2
 
         self.cv2 = cv2
@@ -187,6 +418,11 @@ class V4L2Backend(Backend):
         self.cam.set(cv2.CAP_PROP_FRAME_WIDTH, self.config.width)
         self.cam.set(cv2.CAP_PROP_FRAME_HEIGHT, self.config.height)
         self.cam.set(cv2.CAP_PROP_FPS, self.config.fps)
+        if self.closed.is_set():
+            self.cam.release()
+            raise CaptureError("V4L2 camera is closed")
+
+    def _load_controls(self):
         self.native_controls = {}
         if shutil.which("v4l2-ctl"):
             try:
@@ -230,11 +466,27 @@ class V4L2Backend(Backend):
             self.apply(self.controls)
 
     def read(self):
+        if self.pipe:
+            return self.pipe.read()
         with self.lock:
             ok, frame = self.cam.read()
         if not ok:
             raise CaptureError("V4L2 device stopped delivering frames")
         return Image.fromarray(self.cv2.cvtColor(frame, self.cv2.COLOR_BGR2RGB))
+
+    def read_jpeg(self):
+        if not self.pipe:
+            return None
+        result = self.pipe.read_jpeg()
+        self.frame_received_at = self.pipe.frame_received_at
+        return result
+
+    def snapshot_jpeg(self):
+        return self.pipe.snapshot_jpeg() if self.pipe else None
+
+    @property
+    def dropped_frames(self):
+        return self.pipe.dropped_frames if self.pipe else 0
 
     def apply(self, values):
         ControlPatch(**values)
@@ -266,6 +518,9 @@ class V4L2Backend(Backend):
         self.controls.update(values)
 
     def close(self):
+        self.closed.set()
+        if self.pipe:
+            self.pipe.close()
         if hasattr(self, "cam"):
             self.cam.release()
 
@@ -367,6 +622,205 @@ class NetworkBackend(Backend):
                 self.proc.stdout.close()
 
 
+class NativePreview:
+    """Decode a bounded compressed fork; preview backpressure cannot block capture."""
+
+    def __init__(self, owner):
+        from .encoded import AnnexBParser, EncodedHub
+
+        self.owner = owner
+        self.parser = AnnexBParser()
+        self.hub = EncodedHub(max_bytes=4 * 1024 * 1024, max_seconds=0, max_frames=120)
+        self.subscription = self.hub.subscribe(max_bytes=4 * 1024 * 1024, max_frames=120)
+        self.context = None
+        self.process = None
+        self.writer = self.reader = None
+        self.stopped = threading.Event()
+
+    def open(self):
+        owner = self.owner
+        width, height = owner.preview_size
+        rate = min(owner.config.fps, 10)
+        sampling = (
+            "select='isnan(prev_selected_t)+lt(t,prev_selected_t)"
+            f"+gt(floor((t+{DSHOW_CLOCK_TOLERANCE_SECONDS})*{rate}),"
+            f"floor((prev_selected_t+{DSHOW_CLOCK_TOLERANCE_SECONDS})*{rate}))',"
+            f"scale={width}:{height}"
+        )
+        command = [
+            owner.ffmpeg,
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-probesize",
+            "32",
+            "-analyzeduration",
+            "0",
+            "-flags",
+            "low_delay",
+            "-threads",
+            "1",
+            "-use_wallclock_as_timestamps",
+            "1",
+            "-f",
+            "h264",
+            "-i",
+            "pipe:0",
+            "-an",
+            "-vf",
+            sampling,
+            "-fps_mode",
+            "passthrough",
+            *owner.codec_arguments(),
+            "-flush_packets",
+            "1",
+            "-f",
+            "image2pipe",
+            "pipe:1",
+        ]
+        self.context = owned_process(
+            command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+        )
+        self.process = self.context.__enter__()
+        self.writer = threading.Thread(
+            target=self._write, name=f"native-preview-input-{owner.config.id}", daemon=True
+        )
+        self.reader = threading.Thread(
+            target=owner._drain,
+            args=(self.process, bytearray(), self.stopped),
+            name=f"native-preview-output-{owner.config.id}",
+            daemon=True,
+        )
+        self.writer.start()
+        self.reader.start()
+
+    def offer(self, chunk, *, frame_complete=False):
+        packets = self.parser.feed(chunk)
+        if frame_complete:
+            packets.extend(self.parser.end_access_unit())
+        for packet in packets:
+            self.hub.publish(packet, epoch=self.hub.epoch)
+            self.owner.last_native_frame = time.monotonic()
+
+    def _write(self):
+        try:
+            while not self.stopped.is_set():
+                packet = self.subscription.read(timeout=0.2, cancel_event=self.stopped)
+                if packet is None:
+                    continue
+                self.process.stdin.write(packet.data)
+                self.process.stdin.flush()
+        except Exception:
+            if not self.stopped.is_set():
+                with self.owner.frames:
+                    self.owner.reader_error = "Native camera preview decoder is unavailable"
+                    self.owner.frames.notify_all()
+
+    def snapshot_jpeg(self):
+        owner = self.owner
+        deadline = time.monotonic() + 6
+        subscription = self.hub.subscribe(max_bytes=4 * 1024 * 1024, max_frames=120)
+        try:
+            packet = subscription.read(timeout=5, cancel_event=owner.closed)
+        finally:
+            subscription.close()
+        if packet is None or not packet.keyframe:
+            raise CaptureError("Native camera has no current keyframe for a full-resolution photo")
+        command = [
+            owner.ffmpeg,
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-probesize",
+            "32",
+            "-analyzeduration",
+            "0",
+            "-threads",
+            "1",
+            "-f",
+            "h264",
+            "-i",
+            "pipe:0",
+            "-an",
+            "-frames:v",
+            "1",
+            *owner.codec_arguments(),
+            "-f",
+            "image2pipe",
+            "pipe:1",
+        ]
+        output = bytearray()
+        writer = None
+        write_error = []
+        try:
+            with owned_process(
+                command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+            ) as process:
+
+                def write():
+                    try:
+                        process.stdin.write(packet.data)
+                        process.stdin.close()
+                    except (OSError, ValueError):
+                        write_error.append(True)
+
+                writer = threading.Thread(
+                    target=write, name=f"native-photo-input-{owner.config.id}", daemon=True
+                )
+                writer.start()
+                read = _output_reader(process.stdout.fileno())
+                while True:
+                    if owner.closed.is_set():
+                        raise CaptureError("Native camera is closed")
+                    chunk = read(min(65536, max(1, 16 * 1024 * 1024 + 1 - len(output))))
+                    if chunk:
+                        output.extend(chunk)
+                        if len(output) > 16 * 1024 * 1024:
+                            raise CaptureError("Native photo exceeds the supported size")
+                    elif process.poll() is not None:
+                        if process.returncode or write_error:
+                            raise CaptureError("Native photo decoder is unavailable")
+                        break
+                    if time.monotonic() >= deadline:
+                        raise CaptureError("Native photo decoder timed out")
+                    if not chunk:
+                        time.sleep(0.01)
+        finally:
+            if writer:
+                writer.join(timeout=5)
+                if writer.is_alive():
+                    raise CaptureError("Native photo decoder worker did not stop")
+        try:
+            with Image.open(io.BytesIO(output)) as image:
+                if image.format != "JPEG" or image.size != (
+                    owner.config.width,
+                    owner.config.height,
+                ):
+                    raise CaptureError(
+                        "Native photo does not match the configured source resolution"
+                    )
+        except (OSError, ValueError) as exc:
+            raise CaptureError("Native photo decoder returned an invalid image") from exc
+        return bytes(output)
+
+    def close(self):
+        self.stopped.set()
+        self.subscription.close()
+        self.hub.close()
+        if self.process is not None:
+            terminate_process(self.process)
+        for worker in (self.writer, self.reader):
+            if worker and worker.is_alive():
+                worker.join(timeout=5)
+                if worker.is_alive():
+                    raise CaptureError("Native preview worker did not stop")
+        if self.context is not None:
+            self.context.__exit__(None, None, None)
+            self.context = None
+
+
 class DirectShowBackend(NetworkBackend):
     """Windows USB or integrated camera captured through FFmpeg's DirectShow input."""
 
@@ -390,6 +844,9 @@ class DirectShowBackend(NetworkBackend):
         self.source_format = None
         self.source_format_type = None
         self.jpeg_copy = False
+        self.h264_copy = False
+        self.native_preview = None
+        self.native_context = None
 
     def native_modes(self):
         """Return the device's discrete capture sizes; listing them opens no capture stream."""
@@ -412,10 +869,15 @@ class DirectShowBackend(NetworkBackend):
             except ValueError:
                 continue
             if 0 < low <= high <= 240 and math.isfinite(high):
-                self.native_profiles.append({
-                    "size": size, "min_fps": low, "max_fps": high,
-                    "format_type": match["format_type"], "format": match["format"],
-                })
+                self.native_profiles.append(
+                    {
+                        "size": size,
+                        "min_fps": low,
+                        "max_fps": high,
+                        "format_type": match["format_type"],
+                        "format": match["format"],
+                    }
+                )
         return sorted(sizes, key=lambda size: (size[0] * size[1], size)) or None
 
     def _negotiate_source(self):
@@ -425,20 +887,47 @@ class DirectShowBackend(NetworkBackend):
 
         def preferred(profile):
             rate = min(max(self.config.fps, profile["min_fps"]), profile["max_fps"])
-            pixel_cost = 0 if profile["format"] == "mjpeg" else (
-                1 if profile["format"] == "nv12" else 2
+            h264 = (
+                profile["format_type"] == "vcodec"
+                and profile["format"] == "h264"
+                and self.config.encoder == "auto"
+                and self.encoded_sink
+                and not self.native_disabled
+                and profile["size"] == (self.config.width, self.config.height)
+                and native_rate_matches(rate, self.config.fps)
             )
-            return (max(0, self.config.fps - rate), abs(rate - self.config.fps), pixel_cost)
+            pixel_cost = (
+                -1
+                if h264
+                else 0
+                if profile["format"] == "mjpeg"
+                else (1 if profile["format"] == "nv12" else 2)
+            )
+            difference = (
+                0 if native_rate_matches(rate, self.config.fps) else abs(rate - self.config.fps)
+            )
+            deficit = (
+                0 if native_rate_matches(rate, self.config.fps) else max(0, self.config.fps - rate)
+            )
+            return (deficit, difference, pixel_cost)
 
         selected = min(profiles, key=preferred)
-        self.source_fps = min(
-            max(self.config.fps, selected["min_fps"]), selected["max_fps"]
-        )
+        self.source_fps = min(max(self.config.fps, selected["min_fps"]), selected["max_fps"])
         self.source_format_type, self.source_format = selected["format_type"], selected["format"]
         self.jpeg_copy = (
-            self.source_format_type == "vcodec" and self.source_format == "mjpeg"
+            self.source_format_type == "vcodec"
+            and self.source_format == "mjpeg"
             and self.source_size == (self.config.width, self.config.height)
-            and self.source_fps == self.config.fps
+            and native_rate_matches(self.source_fps, self.config.fps)
+        )
+        self.h264_copy = bool(
+            self.source_format_type == "vcodec"
+            and self.source_format == "h264"
+            and self.source_size == (self.config.width, self.config.height)
+            and native_rate_matches(self.source_fps, self.config.fps)
+            and self.config.encoder == "auto"
+            and self.encoded_sink
+            and not self.native_disabled
         )
 
     def source_mode(self, width, height):
@@ -457,7 +946,8 @@ class DirectShowBackend(NetworkBackend):
         rate = ["-framerate", f"{self.source_fps:g}"] if self.source_fps else []
         native_format = (
             ["-" + self.source_format_type, self.source_format]
-            if self.source_format_type and self.source_format else []
+            if self.source_format_type and self.source_format
+            else []
         )
         return ["-f", "dshow", "-rtbufsize", "32M", *mode, *rate, *native_format, *source]
 
@@ -492,7 +982,8 @@ class DirectShowBackend(NetworkBackend):
         self._spawn()
         self.capabilities["modes"] = [f"{width}x{height}" for width, height in self.modes or ()]
         self.capabilities.update(
-            source_fps=self.source_fps, source_format=self.source_format,
+            source_fps=self.source_fps,
+            source_format=self.source_format,
             jpeg_passthrough=self.jpeg_copy,
             jpeg_quality="source" if self.jpeg_copy else self.config.quality,
         )
@@ -502,8 +993,12 @@ class DirectShowBackend(NetworkBackend):
             # Keep the first complete JPEG in the same bounded slot used by read().
             with self.frames:
                 self.frames.wait_for(
-                    lambda: self.closed.is_set() or self.reader_stop.is_set()
-                    or self.latest_jpeg is not None or self.reader_error
+                    lambda: (
+                        self.closed.is_set()
+                        or self.reader_stop.is_set()
+                        or self.latest_jpeg is not None
+                        or self.reader_error
+                    )
                 )
                 if self.closed.is_set() or self.reader_stop.is_set():
                     raise CaptureError("DirectShow camera is closed")
@@ -512,13 +1007,19 @@ class DirectShowBackend(NetworkBackend):
         except CaptureError:
             if self.closed.is_set():
                 raise
+            if self.native_attempted:
+                # The service owns native→shared-encoder fallback and its stream epoch.
+                raise
             # Unknown modes and no frame at the profile size: use the device's default mode.
             self._stop_stream()
             self.source_size = None
             self.source_fps = self.source_format = self.source_format_type = None
             self.jpeg_copy = False
+            self.h264_copy = False
             self.capabilities.update(
-                source_fps=None, source_format=None, jpeg_passthrough=False,
+                source_fps=None,
+                source_format=None,
+                jpeg_passthrough=False,
                 jpeg_quality=self.config.quality,
             )
             self._spawn()
@@ -527,6 +1028,9 @@ class DirectShowBackend(NetworkBackend):
         with self.lock:
             if self.closed.is_set():
                 raise CaptureError("DirectShow camera is closed")
+            if self.h264_copy:
+                self._spawn_native()
+                return
             super().open()
             with self.frames:
                 self.latest_jpeg, self.reader_error = None, None
@@ -534,15 +1038,129 @@ class DirectShowBackend(NetworkBackend):
                 self.reader_stop = threading.Event()
             self.capabilities["frame_delivery"] = "latest"
             self.reader_thread = threading.Thread(
-                target=self._drain, args=(self.proc, self.buffer, self.reader_stop),
-                name=f"dshow-pipe-{self.config.id}", daemon=True,
+                target=self._drain,
+                args=(self.proc, self.buffer, self.reader_stop),
+                name=f"dshow-pipe-{self.config.id}",
+                daemon=True,
             )
             self.watch_thread = threading.Thread(
-                target=self._watch, args=(self.proc, self.reader_stop),
-                name=f"dshow-watch-{self.config.id}", daemon=True,
+                target=self._watch,
+                args=(self.proc, self.reader_stop),
+                name=f"dshow-watch-{self.config.id}",
+                daemon=True,
             )
             self.reader_thread.start()
             self.watch_thread.start()
+
+    def _spawn_native(self):
+        self.native_attempted = True
+        from .tsdemux import NativeTransportStreamDemuxer
+
+        self.native_demuxer = NativeTransportStreamDemuxer()
+        self.preview_size = preview_size(self.config.width, self.config.height)
+        with self.frames:
+            self.latest_jpeg, self.reader_error = None, None
+            self.last_frame = self.last_native_frame = time.monotonic()
+            self.reader_stop = threading.Event()
+        self.native_preview = NativePreview(self)
+        self.native_preview.open()
+        command = [
+            self.ffmpeg,
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            *self.input_arguments(),
+            "-map",
+            "0:v:0",
+            "-an",
+            "-c:v",
+            "copy",
+            "-bsf:v",
+            "h264_mp4toannexb,h264_metadata=aud=insert",
+            "-flush_packets",
+            "1",
+            "-f",
+            "mpegts",
+            "-mpegts_start_pid",
+            "256",
+            "-mpegts_pmt_start_pid",
+            "4096",
+            "-muxdelay",
+            "0",
+            "-muxpreload",
+            "0",
+            "-fps_mode",
+            "passthrough",
+            "pipe:1",
+        ]
+        self.native_context = owned_process(
+            command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+        )
+        self.proc = self.native_context.__enter__()
+        self.native_encoded = True
+        self.capabilities.update(
+            model=self.model,
+            controls=[],
+            audio=False,
+            native_encoded=True,
+            encoded_source="uvc-h264",
+            encoder_implementation="camera-h264-passthrough",
+            native_encoder_hardware=False,
+            capture_to_encoder_zero_copy=False,
+            zero_copy_scope=None,
+            frame_delivery="latest",
+            preview_size=list(self.preview_size),
+            preview_fps=min(self.config.fps, 10),
+        )
+        self.reader_thread = threading.Thread(
+            target=self._drain_native,
+            args=(self.proc, self.reader_stop),
+            name=f"native-h264-{self.config.id}",
+            daemon=True,
+        )
+        self.watch_thread = threading.Thread(
+            target=self._watch,
+            args=(self.proc, self.reader_stop),
+            name=f"native-watch-{self.config.id}",
+            daemon=True,
+        )
+        self.reader_thread.start()
+        self.watch_thread.start()
+
+    def _drain_native(self, process, stopped):
+        demuxer = self.native_demuxer
+
+        def publish(unit):
+            for offset in range(0, len(unit.data), 65536):
+                if stopped.is_set():
+                    return
+                final = offset + 65536 >= len(unit.data)
+                chunk = unit.data[offset : offset + 65536]
+                self.encoded_sink(
+                    chunk,
+                    timestamp_us=unit.timestamp_us,
+                    keyframe=unit.keyframe,
+                    frame_complete=final,
+                )
+                self.native_preview.offer(chunk, frame_complete=final)
+
+        try:
+            read = getattr(process.stdout, "read1", process.stdout.read)
+            while not stopped.is_set():
+                chunk = read(65536)
+                if not chunk:
+                    if not stopped.is_set() and process.wait(timeout=1) == 0:
+                        for unit in demuxer.finish():
+                            publish(unit)
+                    raise CaptureError(f"{self.model} is unavailable")
+                for unit in demuxer.feed(chunk):
+                    publish(unit)
+        except Exception:
+            if not stopped.is_set():
+                with self.frames:
+                    self.reader_error = "Native camera encoded stream is unavailable"
+                    self.frames.notify_all()
 
     def _drain(self, process, buffer, stopped):
         try:
@@ -559,7 +1177,9 @@ class DirectShowBackend(NetworkBackend):
         except (CaptureError, OSError, ValueError) as exc:
             with self.frames:
                 self.reader_error = (
-                    str(exc) if isinstance(exc, CaptureError) else "DirectShow camera is unavailable"
+                    str(exc)
+                    if isinstance(exc, CaptureError)
+                    else "DirectShow camera is unavailable"
                 )
                 self.frames.notify_all()
 
@@ -592,6 +1212,9 @@ class DirectShowBackend(NetworkBackend):
                 raise CaptureError("DirectShow camera has no current frame")
         return jpeg
 
+    def snapshot_jpeg(self):
+        return self.native_preview.snapshot_jpeg() if self.native_encoded else None
+
     def close(self):
         # A profile/service cancellation is durable; a mode-negotiation retry only
         # stops its current subprocess and must not undo a concurrent close().
@@ -606,6 +1229,8 @@ class DirectShowBackend(NetworkBackend):
                 self.frames.notify_all()
             if hasattr(self, "proc"):
                 terminate_process(self.proc)
+            if self.native_preview:
+                self.native_preview.close()
             for worker in (self.reader_thread, self.watch_thread):
                 if worker and worker.is_alive():
                     worker.join(timeout=5)
@@ -613,6 +1238,72 @@ class DirectShowBackend(NetworkBackend):
                         raise CaptureError("DirectShow worker did not stop")
             if hasattr(self, "proc") and self.proc.stdout:
                 self.proc.stdout.close()
+            if self.native_context:
+                self.native_context.__exit__(None, None, None)
+                self.native_context = None
+
+
+class V4L2CompressedBackend(DirectShowBackend):
+    """A negotiated compressed V4L2 source with one physical capture owner."""
+
+    model = "V4L2 camera"
+
+    def native_modes(self):
+        if hasattr(self, "listed_modes"):
+            return self.listed_modes
+        self.native_profiles.clear()
+        if not shutil.which("v4l2-ctl"):
+            return None
+        try:
+            listing = _bounded_stdout(
+                ["v4l2-ctl", "-d", self.config.source, "--list-formats-ext"],
+                limit=65536,
+                timeout=5,
+            ).decode("utf-8", "replace")
+        except (OSError, subprocess.SubprocessError, ValueError):
+            return None
+        codec, size = None, None
+        for line in listing.splitlines():
+            format_match = re.search(r"\[\d+\]:\s*'([A-Z0-9]{4})'", line)
+            if format_match:
+                codec = {"MJPG": "mjpeg", "H264": "h264"}.get(format_match[1])
+                size = None
+                continue
+            size_match = re.search(r"Size:\s*Discrete\s+(\d+)x(\d+)", line)
+            if size_match:
+                size = tuple(map(int, size_match.groups()))
+                continue
+            rate_match = re.search(r"Interval:\s*Discrete.*\(([\d.]+)\s+fps\)", line)
+            if codec and size and rate_match:
+                rate = float(rate_match[1])
+                if 0 < rate <= 240 and math.isfinite(rate):
+                    self.native_profiles.append(
+                        {
+                            "size": size,
+                            "min_fps": rate,
+                            "max_fps": rate,
+                            "format_type": "vcodec",
+                            "format": codec,
+                        }
+                    )
+        return (
+            sorted({p["size"] for p in self.native_profiles}, key=lambda s: (s[0] * s[1], s))
+            or None
+        )
+
+    def input_arguments(self):
+        return [
+            "-f",
+            "v4l2",
+            "-input_format",
+            self.source_format,
+            "-video_size",
+            "{}x{}".format(*self.source_size),
+            "-framerate",
+            f"{self.source_fps:g}",
+            "-i",
+            self.config.source,
+        ]
 
 
 class LegacyBackend(Backend):

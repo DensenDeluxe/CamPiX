@@ -11,14 +11,16 @@ Browser — REST / WebSocket / current JPEG / WHEP / HLS
 campixd (one process per data directory)
    ├── FastAPI: versioned API, static interface, authenticated media proxy
    ├── SQLite/WAL: users, sessions, cameras, schedules, media, events, export jobs
-   ├── Per camera: capture thread → JPEG / bounded pre-roll / small analysis frames
-   │    ├── Picamera2: distribution libcamera and dynamic sensor controls
-   │    ├── V4L2: OpenCV capture and v4l2-ctl controls
+   ├── Per camera: sole capture owner → JPEG preview / small analysis frames
+   │    ├── Picamera2: native H.264 main / lores preview / dynamic controls
+   │    ├── V4L2: matching H.264/MJPEG capture or OpenCV / v4l2-ctl controls
    │    ├── DirectShow: isolated FFmpeg device input on Windows
    │    ├── Network: isolated FFmpeg decoder, RTSP/HTTP(S)
    │    └── Legacy: existing local JPEG preview (not an MMAL/FIFO driver)
    ├── Per camera: motion worker → event → recording / renewed post-roll
-   ├── Per recording: bounded JPEG queue → FFmpeg → atomically finalized MP4
+   ├── Per camera: native H.264 or shared FFmpeg encoder → bounded packet hub
+   │    ├── Recording subscriber → timestamped TS → copy remux → finalized MP4
+   │    └── Live subscriber → timestamped TS → copy remux → MediaMTX
    ├── Scheduler: persistent claim-before-execute rules, no backlog replay
    ├── Export worker: bounded queue, timelapse, explicit job status
    └── Optional: MediaMTX supervisor → RTSP publisher → WebRTC/HLS
@@ -26,11 +28,11 @@ campixd (one process per data directory)
 
 ## Worker and encoding boundaries
 
-Capture, motion analysis, and recording run outside HTTP request handling. A failed camera is reopened with bounded retry backoff. Recorders and publishers have independent FFmpeg processes; a slow encoder does not block the capture thread. The recorder drops and reports excess frames instead of consuming unbounded memory. Pre-roll and recording queues are each limited to 32 MiB per camera.
+Capture, motion analysis, encoding and recording run outside HTTP request handling. A failed camera is reopened with bounded retry backoff. One H.264 producer per camera feeds a bounded packet hub; recording and publishing use independent copy-only FFmpeg remux processes. JPEG capture has a latest-frame slot, so encoder backpressure cannot stall capture. Encoded pre-roll and each recording subscriber are bounded to 32 MiB, 600 access units and the configured pre-roll duration. A recording queue overrun fails visibly and retains its partial file; a live queue drops its queued GOP and rejoins a configured IDR. Consumers share immutable encoded bytes, not additional encode sessions.
 
-DirectShow has a separate raw-JPEG pipe reader and one pending complete frame. It continuously drains FFmpeg while image processing takes the latest frame, discarding overwritten images rather than replaying a FIFO backlog. Timestamp-based sampling reduces work before scaling; output passthrough prevents FFmpeg from inventing frames across clock gaps or above the native source rate. A watchdog requires complete frames, and permanent cancellation prevents mode retries from reopening a closed device. Capture frame age retains the pipe receipt time through processing; `capture_dropped_frames` counts overwritten JPEGs separately from recording drops. Pipe receipt age is not a measurement of sensor-to-screen latency.
+DirectShow has a separate raw-JPEG pipe reader and one pending complete frame. It continuously drains FFmpeg while image processing takes the latest frame, discarding overwritten images rather than replaying a FIFO backlog. Timestamp-based sampling reduces work before scaling; output passthrough prevents FFmpeg from inventing frames across clock gaps or above the native source rate. A watchdog requires complete frames, and permanent cancellation prevents mode retries from reopening a closed device. Short Windows pacing waits use high-resolution sleep with bounded cancellation instead of rounding every frame to an Event wait tick. Capture frame age retains the pipe receipt time through processing; `capture_dropped_frames` counts overwritten JPEGs separately from recording drops. Pipe receipt age is not a measurement of sensor-to-screen latency.
 
-The live RTSP publisher bounds known-codec probing, flushes each input frame, and assigns wall-clock timestamps with variable frame-rate output. It requests keyframes at one-second clock intervals when frames are available. Recording and timelapse timing remain separate and retain their frame-count behavior.
+The shared JPEG encoder assigns each output access unit its actual input receipt timestamp. Picamera2 supplies relative encoder timestamps anchored to the local monotonic clock; UVC copy capture carries the original FFmpeg PTS through a bounded MPEG-TS demuxer and anchors its relative clock locally. Neither anchor proves sensor-to-screen latency. A bounded MPEG-TS mux preserves those intervals, keyframe-aligned pre-roll and clock gaps when publishing or recording with stream copy. Slow source delivery no longer shortens a recording to the requested encoder-header rate. Timelapse retains its explicitly requested frame-count timing. Reordered B frames and changing decoder configuration are rejected; codec restarts create a new epoch and terminate recordings rather than joining incompatible streams.
 
 Motion analysis retains the last analyzed image between polls, including when capture delivers fewer than five frames per second. Recording workers check encoder exit even when no new frames arrive, so an encoder failure reaches a terminal error instead of leaving an idle recording active.
 
@@ -40,9 +42,9 @@ Short-lived diagnostic processes read only available pipe bytes and enforce an o
 
 The capture worker preserves matching DirectShow/network JPEG bytes without a Pillow decode/re-encode cycle. Motion decoding/resizing runs on the latest sample in the independent analysis worker, only when motion is enabled. DirectShow negotiates reported size/rate/format combinations and copies matching native MJPEG; it does not request invented sensor rates. The JPEG parser scans incoming bytes once, retaining marker-boundary overlap rather than repeatedly scanning a growing frame.
 
-`auto` prefers a profile-probed FFmpeg hardware H.264 encoder and then tested software `libx264`. Allowlisted paths cover NVENC, QSV, AMF, VideoToolbox, VAAPI and V4L2 M2M. Inventory and profile preparation use bounded processes, output limits, cancellation, a finite cache and serialized probe slots. A dedicated encoder-preparation worker keeps this work outside HTTP requests and capture; JPEG remains available while preparation is pending or fails. Recorder and publisher consume immutable selections with centralized codec/device/pixel-format/low-delay settings. QSV and VideoToolbox explicitly prohibit hidden software implementations. Encoder usability is distinct from physical-camera qualification; `hardware_verified` is not awarded by synthetic probes.
+`auto` prefers a profile-probed FFmpeg hardware H.264 encoder and then tested software `libx264`. Allowlisted paths cover NVENC, QSV, AMF, VideoToolbox, VAAPI and V4L2 M2M. Inventory and profile preparation use bounded processes, output limits, cancellation, a finite cache and serialized probe slots. A dedicated encoder-preparation worker keeps this work outside HTTP requests and capture; JPEG remains available while preparation is pending or fails. The sole shared encoder consumes the immutable selection with centralized codec/device/pixel-format/low-delay settings; recorders and publishers copy its packets. QSV and VideoToolbox explicitly prohibit hidden software implementations. Encoder usability is distinct from physical-camera qualification; `hardware_verified` is not awarded by synthetic probes.
 
-Publishing uses an observable automatic retry with another encoder after a hardware session fails. Explicit choices retain their strict failure behavior. Recording failure retains the partial and reports an error; the encoder is not switched midway through a file. Direct Picamera2 H.264, compressed H.264 UVC passthrough, DMABUF/zero-copy, and a shared live-view/recording encoder remain unimplemented. See the [encoding design and acceptance contract](NATIVE-ENCODING-DESIGN.md).
+The shared encoder performs observable automatic fallback after a hardware decoder or encoder session fails. Explicit choices retain strict failure behavior. Publishing transport failures cannot change the encoder. A restart invalidates old subscribers and recording fails with its partial retained. Native Picamera2 uses one camera with YUV main video and a small preview/analysis stream; full-resolution photos execute on the capture worker through a bounded request queue. Reported, matching H.264 DirectShow/V4L2 modes (including nominal 24/30/60 FPS paired with 23.976/29.97/59.94 FPS delivery) use one compressed capture owner and a separate bounded preview decoder. DMABUF is reported only for Picamera2's actual V4L2 encoder. Probed NVDEC/NVENC, QSV or VAAPI compressed-JPEG paths can retain decoded frames in hardware; strict pixel formats prohibit hidden hardware downloads or software conversion. Compressed packets, previews, photos and container buffers remain outside that raw-frame zero-copy scope. See the [encoding design and acceptance contract](NATIVE-ENCODING-DESIGN.md).
 
 ## Capabilities, not assumed compatibility
 
@@ -66,4 +68,4 @@ LAN/WAN WebRTC requires an external, secured MediaMTX installation with reachabl
 
 The report proposes a long-term universal successor. Version 0.2.0 uses Python/FastAPI instead of Rust/Go and buildless JavaScript instead of TypeScript, Web Components, and a PWA. This shortens the Picamera2 integration path; it does not fulfill those specific language and frontend recommendations.
 
-AI/Hailo/IMX500, vendor GStreamer, ONVIF, complete historical macros/FIFOs, modern external event hooks, and native zero-copy pipelines are not hidden behind simulated success indicators. They are explicitly listed as outstanding in [RELEASE-READINESS.md](RELEASE-READINESS.md).
+AI/Hailo/IMX500, vendor GStreamer, ONVIF, complete historical macros/FIFOs, modern external event hooks, and additional vendor-specific native pipelines are not hidden behind simulated success indicators. They are explicitly listed as outstanding in [RELEASE-READINESS.md](RELEASE-READINESS.md).

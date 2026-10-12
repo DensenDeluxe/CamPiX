@@ -14,8 +14,10 @@ from urllib.parse import urlsplit
 import httpx
 
 from .capture import CaptureError, terminate_process
+from .encoded import EncodedOverrun, EncodedRestart, EncodedStreamEnded
 from .encoding import EncoderUnavailable, encoder_args, select_encoder
 from .processes import NO_WINDOW
+from .tsmux import TransportStreamError, TransportStreamMuxer
 
 MEDIAMTX_VERSION = "1.21.2"
 HLS_PROXY_MAX_BYTES = 8 * 1024 * 1024  # Matches the managed hlsSegmentMaxSize of 8M.
@@ -71,12 +73,18 @@ class Publisher:
         self.failed_encoders = set()
         self.failed_until = {}
         self.spawn_lock = threading.Lock()
+        self.subscription = None
+        self.packet_passthrough = getattr(camera, "encoded_hub", None) is not None
+        self.packets_sent = 0
+        self.last_packet_at = None
         self.thread = threading.Thread(
             target=self._run, name=f"publish-{camera.config.id}", daemon=True
         )
         self.thread.start()
 
     def _run(self):
+        if getattr(self.camera, "encoded_hub", None) is not None:
+            return self._run_shared()
         self.failed_encoders = getattr(self, "failed_encoders", set())
         self.failed_until = getattr(self, "failed_until", {})
         self.spawn_lock = getattr(self, "spawn_lock", threading.Lock())
@@ -208,9 +216,138 @@ class Publisher:
                             pass
             self.halt.wait(3)
 
+    def _run_shared(self):
+        """Copy packets from the sole camera encoder; transport failures cannot reselect it."""
+        self.spawn_lock = getattr(self, "spawn_lock", threading.Lock())
+        self.packet_passthrough = True
+        self.packets_sent = getattr(self, "packets_sent", 0)
+        self.last_packet_at = None
+        self.subscription = None
+        while not self.halt.is_set():
+            subscription = None
+            process = None
+            retry = 3.0
+            try:
+                source_halt = getattr(self.camera, "halt", None)
+                if source_halt is not None and source_halt.is_set():
+                    break
+                subscription = self.camera.encoded_hub.subscribe(
+                    "live", max_bytes=8 * 1024 * 1024, max_frames=120
+                )
+                self.subscription = subscription
+                first = None
+                while first is None and not self.halt.is_set():
+                    first = subscription.read(timeout=0.2, cancel_event=self.halt)
+                    if source_halt is not None and source_halt.is_set():
+                        return
+                if self.halt.is_set():
+                    break
+                self.selection = getattr(self.camera, "encoding_selection", None)
+                cfg = self.camera.config
+                command = [
+                    self.settings.ffmpeg,
+                    "-nostdin",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    # MPEG-TS supplies the capture clock, including pre-roll and skipped frames.
+                    "-probesize",
+                    "32",
+                    "-analyzeduration",
+                    "0",
+                    "-f",
+                    "mpegts",
+                    "-i",
+                    "pipe:0",
+                    "-map",
+                    "0:v:0",
+                    "-an",
+                    "-c:v",
+                    "copy",
+                    "-fps_mode",
+                    "passthrough",
+                    "-flush_packets",
+                    "1",
+                    "-f",
+                    "rtsp",
+                    "-rtsp_transport",
+                    "tcp",
+                    self.settings.mediamtx_rtsp.rstrip("/") + "/" + cfg.id,
+                ]
+                with self.spawn_lock:
+                    if self.halt.is_set() or (source_halt is not None and source_halt.is_set()):
+                        break
+                    process = subprocess.Popen(
+                        command,
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        creationflags=NO_WINDOW,
+                    )
+                    self.proc = process
+                muxer = TransportStreamMuxer(epoch=first.epoch)
+                current = first
+                while not self.halt.is_set():
+                    if process.poll() is not None:
+                        raise CaptureError("Media packet publisher stopped")
+                    if current is None:
+                        if (
+                            self.last_packet_at is not None
+                            and time.monotonic() - self.last_packet_at > 3
+                        ):
+                            self.online = False
+                            self.error = "Waiting for shared encoded camera packets"
+                        current = subscription.read(timeout=0.2, cancel_event=self.halt)
+                        continue
+                    if self.halt.is_set() or (source_halt is not None and source_halt.is_set()):
+                        break
+                    process.stdin.write(muxer.mux(current))
+                    process.stdin.flush()
+                    self.packets_sent += 1
+                    if self.halt.is_set():
+                        break
+                    if process.poll() is not None:
+                        raise CaptureError("Media packet publisher stopped")
+                    self.last_packet_at = time.monotonic()
+                    self.online, self.error = True, None
+                    current = None
+            except EncodedRestart:
+                self.online, self.error = (
+                    False,
+                    "Shared encoder restarted; reconnecting media packets",
+                )
+                retry = 0.1
+            except (
+                CaptureError,
+                EncodedOverrun,
+                EncodedStreamEnded,
+                TransportStreamError,
+                OSError,
+            ):
+                self.online, self.error = False, "Media packet publisher disconnected; retrying"
+            finally:
+                self.online = False
+                self.last_packet_at = None
+                if subscription is not None:
+                    subscription.close()
+                self.subscription = None
+                if process is not None:
+                    terminate_process(process)
+                    if process.stdin is not None and not process.stdin.closed:
+                        try:
+                            process.stdin.close()
+                        except OSError:
+                            pass
+            self.halt.wait(retry)
+
     def stop(self):
         with self.spawn_lock:
             self.halt.set()
+            self.online = False
+            self.last_packet_at = None
+            subscription = getattr(self, "subscription", None)
+            if subscription is not None:
+                subscription.close()
             if self.proc:
                 terminate_process(self.proc)
         self.thread.join(timeout=10)
@@ -294,7 +431,10 @@ class MediaPlane:
                     if (
                         camera_id not in self.publishers
                         and camera.encoding_ready.is_set()
-                        and camera.encoding_selection is not None
+                        and (
+                            camera.encoding_selection is not None
+                            or getattr(camera, "encoded_hub", None) is not None
+                        )
                     ):
                         self.publishers[camera_id] = Publisher(camera, self.settings)
                 headers = (
@@ -335,6 +475,16 @@ class MediaPlane:
                     "encoder": pub.selection.codec if pub.selection else None,
                     "hardware": bool(pub.selection and pub.selection.hardware),
                     "fallback_reason": pub.selection.fallback_reason if pub.selection else None,
+                    "packet_passthrough": bool(getattr(pub, "packet_passthrough", False)),
+                    "packets_sent": getattr(pub, "packets_sent", 0),
+                    "packet_ready": bool(
+                        getattr(pub, "last_packet_at", None) is not None
+                        and time.monotonic() - pub.last_packet_at <= 3
+                        and pub.online
+                    ),
+                    "zero_copy_raw_frames": bool(
+                        pub.selection and pub.selection.zero_copy_raw_frames
+                    ),
                 }
                 for key, pub in self.publishers.copy().items()
             },

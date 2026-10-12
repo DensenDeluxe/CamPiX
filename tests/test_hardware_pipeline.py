@@ -17,13 +17,14 @@ from campix.config import Settings
 from campix.encoding import EncoderSelection, EncoderUnavailable, encoder_args
 from campix.mediamtx import MediaPlane, Publisher
 from campix.models import CameraConfig
+from campix.processes import owned_process
 
 from .conftest import signin
-from .test_service import wait_online
+from .test_service import wait_online, wait_packet_ready
 
 
 def selection_for(config):
-    inputs, outputs = encoder_args("h264_nvenc", config.width, config.height, config.fps)
+    inputs, outputs = encoder_args("libx264", config.width, config.height, config.fps)
     return EncoderSelection(
         codec="h264_nvenc",
         hardware=True,
@@ -47,14 +48,21 @@ def pipeline_app(tmp_path, monkeypatch, *, encoder="auto"):
     app = create_app(Settings(data_dir=tmp_path, demo=True, min_free_mb=32))
     app.state.auth.create_user("admin", "test-only-admin-password")
     config = CameraConfig(
-        id="demo", name="Synthetic pipeline test", backend="synthetic",
-        width=640, height=360, fps=10, encoder=encoder,
+        id="demo",
+        name="Synthetic pipeline test",
+        backend="synthetic",
+        width=640,
+        height=360,
+        fps=10,
+        encoder=encoder,
     )
     app.state.db.execute("INSERT INTO cameras VALUES (?,?)", (config.id, config.model_dump_json()))
     return app, config
 
 
-def test_background_profile_probe_keeps_authenticated_jpeg_and_snapshots_responsive(tmp_path, monkeypatch):
+def test_background_profile_probe_keeps_authenticated_jpeg_and_snapshots_responsive(
+    tmp_path, monkeypatch
+):
     entered, release = threading.Event(), threading.Event()
     profiles = []
     app, config = pipeline_app(tmp_path, monkeypatch)
@@ -106,8 +114,11 @@ def test_cancelled_camera_does_not_adopt_a_late_probe_result(tmp_path, monkeypat
     selection = selection_for(config)
     events, stop_errors = [], []
     camera = runtime.Camera(
-        config, Settings(data_dir=tmp_path), None,
-        SimpleNamespace(publish=lambda *args: events.append(args)), {"encoders": ["h264_nvenc"]},
+        config,
+        Settings(data_dir=tmp_path),
+        None,
+        SimpleNamespace(publish=lambda *args: events.append(args)),
+        {"encoders": ["h264_nvenc"]},
     )
 
     def late_probe(ffmpeg, requested, *, cancel, **kwargs):
@@ -146,7 +157,9 @@ def test_cancelled_camera_does_not_adopt_a_late_probe_result(tmp_path, monkeypat
 
 
 @pytest.mark.parametrize("encoder", ["auto", "h264_nvenc"])
-def test_unusable_encoder_profile_rejects_recording_before_media_reservation(tmp_path, monkeypatch, encoder):
+def test_unusable_encoder_profile_rejects_recording_before_media_reservation(
+    tmp_path, monkeypatch, encoder
+):
     app, _ = pipeline_app(tmp_path, monkeypatch, encoder=encoder)
 
     def unavailable(*args, **kwargs):
@@ -160,8 +173,16 @@ def test_unusable_encoder_profile_rejects_recording_before_media_reservation(tmp
         assert camera.encoding_ready.wait(3)
         assert camera.encoding_selection is None
         with monkeypatch.context() as blocked:
-            blocked.setattr(app.state.store, "reserve", lambda extension: pytest.fail("Failed encoder reserved media"))
-            blocked.setattr(runtime, "Recorder", lambda *args, **kwargs: pytest.fail("Failed encoder launched recording"))
+            blocked.setattr(
+                app.state.store,
+                "reserve",
+                lambda extension: pytest.fail("Failed encoder reserved media"),
+            )
+            blocked.setattr(
+                runtime,
+                "EncodedRecorder",
+                lambda *args, **kwargs: pytest.fail("Failed encoder launched recording"),
+            )
             response = client.post("/api/v1/cameras/demo/recording", json={})
         assert response.status_code == 409 and "No usable H.264 encoder" in response.text
         assert camera.recorder is None
@@ -179,8 +200,13 @@ def test_recording_and_publishing_share_the_prepared_selection(tmp_path, monkeyp
 
     def record(*args, selection, **kwargs):
         recorder = SimpleNamespace(
-            selection=selection, media_id="selection-test", done=threading.Event(),
-            deadline=None, dropped=0, offer=lambda jpeg: None, stop=lambda: {"id": "selection-test"},
+            selection=selection,
+            media_id="selection-test",
+            done=threading.Event(),
+            deadline=None,
+            dropped=0,
+            offer=lambda jpeg: None,
+            stop=lambda: {"id": "selection-test"},
         )
         recordings.append(recorder)
         return recorder
@@ -190,7 +216,8 @@ def test_recording_and_publishing_share_the_prepared_selection(tmp_path, monkeyp
         wait_online(client)
         camera = app.state.cameras.get("demo")
         assert camera.encoding_ready.wait(3)
-        monkeypatch.setattr(runtime, "Recorder", record)
+        wait_packet_ready(client)
+        monkeypatch.setattr(runtime, "EncodedRecorder", record)
         assert client.post("/api/v1/cameras/demo/recording", json={}).status_code == 200
         assert recordings[0].selection is selection
         publisher = Publisher.__new__(Publisher)
@@ -209,29 +236,35 @@ def test_recording_and_publishing_share_the_prepared_selection(tmp_path, monkeyp
         pipe = Pipe()
         # Preparation has completed before replacing the shared subprocess spawner.
         with monkeypatch.context() as publishing:
-            publishing.setattr("campix.mediamtx.subprocess.Popen", lambda *args, **kwargs: SimpleNamespace(stdin=pipe))
+            publishing.setattr(
+                "campix.mediamtx.subprocess.Popen",
+                lambda *args, **kwargs: SimpleNamespace(stdin=pipe, poll=lambda: None),
+            )
             publishing.setattr("campix.mediamtx.terminate_process", lambda process: None)
             publisher._run()
         assert publisher.selection is selection
-        assert received and received[0].startswith(b"\xff\xd8")
+        assert received and received[0].startswith(b"\x47")
         assert pipe.closed and publisher.online is False
         assert client.delete("/api/v1/cameras/demo/recording").status_code == 200
         event = app.state.db.one("SELECT data FROM events WHERE kind='recording.started'")
         assert '"encoder": "h264_nvenc"' in event["data"]
 
 
-def test_hardware_session_failure_retains_partial_without_indexing_success(tmp_path, monkeypatch):
+def test_selected_stream_remux_failure_retains_partial_without_indexing_success(
+    tmp_path, monkeypatch
+):
     app, config = pipeline_app(tmp_path, monkeypatch)
     selection = selection_for(config)
     monkeypatch.setattr(runtime, "select_encoder", lambda *args, **kwargs: selection)
-    original_spawn, original_recorder = subprocess.Popen, runtime.Recorder
+    original_recorder = runtime.EncodedRecorder
     recordings = []
 
     def failed_hardware(command, **kwargs):
         # Simulate a selected driver failing after writing an incomplete file.
-        return original_spawn(
+        return owned_process(
             [
-                sys.executable, "-c",
+                sys.executable,
+                "-c",
                 "from pathlib import Path; import sys; Path(sys.argv[1]).write_bytes(b'interrupted synthetic encoder'); raise SystemExit(1)",
                 command[-1],
             ],
@@ -248,9 +281,10 @@ def test_hardware_session_failure_retains_partial_without_indexing_success(tmp_p
         wait_online(client)
         camera = app.state.cameras.get("demo")
         assert camera.encoding_ready.wait(3)
-        monkeypatch.setattr(runtime, "Recorder", record)
+        wait_packet_ready(client)
+        monkeypatch.setattr(runtime, "EncodedRecorder", record)
         # This injection must not race any background encoder probe.
-        monkeypatch.setattr("campix.recording.subprocess.Popen", failed_hardware)
+        monkeypatch.setattr("campix.recording.owned_process", failed_hardware)
         response = client.post("/api/v1/cameras/demo/recording", json={})
         assert response.status_code == 200
         recorder = recordings[0]
@@ -268,16 +302,27 @@ def test_hardware_session_failure_retains_partial_without_indexing_success(tmp_p
 
 
 @pytest.mark.parametrize("requested", ["auto", "h264_nvenc"])
-def test_publisher_reaps_failed_hardware_and_respects_auto_or_explicit_choice(tmp_path, monkeypatch, requested):
+def test_publisher_reaps_failed_hardware_and_respects_auto_or_explicit_choice(
+    tmp_path, monkeypatch, requested
+):
     config = CameraConfig(
-        id="fallback", name="Publisher recovery", backend="synthetic", encoder=requested,
-        width=640, height=360, fps=30,
+        id="fallback",
+        name="Publisher recovery",
+        backend="synthetic",
+        encoder=requested,
+        width=640,
+        height=360,
+        fps=30,
     )
     hardware = selection_for(config)
     inputs, outputs = encoder_args("libx264", config.width, config.height, config.fps)
     replacement = EncoderSelection(
-        codec="libx264", hardware=False, requested="auto", input_args=inputs,
-        output_args=outputs, fallback_reason="h264_nvenc: runtime-encoding-failed; selected tested libx264",
+        codec="libx264",
+        hardware=False,
+        requested="auto",
+        input_args=inputs,
+        output_args=outputs,
+        fallback_reason="h264_nvenc: runtime-encoding-failed; selected tested libx264",
     )
     preparing, release, written, waiting = (threading.Event() for _ in range(4))
     selected_calls, processes, errors_at_retry = [], [], []
@@ -306,7 +351,8 @@ def test_publisher_reaps_failed_hardware_and_respects_auto_or_explicit_choice(tm
     def launch(command, **kwargs):
         # Real children expose leaked ownership even though these test streams are fake.
         process = original_spawn(
-            [sys.executable, "-c", "import sys; sys.stdin.buffer.read()"], **kwargs,
+            [sys.executable, "-c", "import sys; sys.stdin.buffer.read()"],
+            **kwargs,
         )
         stdin = process.stdin
         ordinal = len(processes)
@@ -336,8 +382,11 @@ def test_publisher_reaps_failed_hardware_and_respects_auto_or_explicit_choice(tm
     ready = threading.Event()
     ready.set()
     publisher.camera = SimpleNamespace(
-        config=config, encoding_ready=ready, encoding_selection=hardware,
-        encoders={"encoders": ["h264_nvenc", "libx264"]}, frame=frame,
+        config=config,
+        encoding_ready=ready,
+        encoding_selection=hardware,
+        encoders={"encoders": ["h264_nvenc", "libx264"]},
+        frame=frame,
     )
     publisher.halt = ImmediateBackoff()
     publisher.proc, publisher.error, publisher.online = None, None, False
@@ -386,12 +435,18 @@ def test_publisher_reaps_failed_hardware_and_respects_auto_or_explicit_choice(tm
     assert all(process.poll() is not None and process.stdin.closed for process in processes)
 
 
-def test_publisher_cancellation_during_fallback_does_not_launch_a_late_encoder(tmp_path, monkeypatch):
+def test_publisher_cancellation_during_fallback_does_not_launch_a_late_encoder(
+    tmp_path, monkeypatch
+):
     config = CameraConfig(id="cancel", name="Canceled fallback", backend="synthetic")
     hardware = selection_for(config)
     inputs, outputs = encoder_args("libx264", config.width, config.height, config.fps)
     replacement = EncoderSelection(
-        codec="libx264", hardware=False, requested="auto", input_args=inputs, output_args=outputs,
+        codec="libx264",
+        hardware=False,
+        requested="auto",
+        input_args=inputs,
+        output_args=outputs,
     )
     entered, cancel_observed = threading.Event(), threading.Event()
     spawned, terminated = [], []
@@ -419,7 +474,9 @@ def test_publisher_cancellation_during_fallback_does_not_launch_a_late_encoder(t
     ready = threading.Event()
     ready.set()
     publisher.camera = SimpleNamespace(
-        config=config, encoding_ready=ready, encoding_selection=hardware,
+        config=config,
+        encoding_ready=ready,
+        encoding_selection=hardware,
         encoders={"encoders": ["h264_nvenc", "libx264"]},
         frame=lambda sequence, timeout: (sequence + 1, b"synthetic"),
     )
@@ -430,7 +487,9 @@ def test_publisher_cancellation_during_fallback_does_not_launch_a_late_encoder(t
     publisher.thread = threading.Thread(target=publisher._run)
     monkeypatch.setattr("campix.mediamtx.subprocess.Popen", launch)
     monkeypatch.setattr("campix.mediamtx.select_encoder", late_selection)
-    monkeypatch.setattr("campix.mediamtx.terminate_process", lambda process: terminated.append(process))
+    monkeypatch.setattr(
+        "campix.mediamtx.terminate_process", lambda process: terminated.append(process)
+    )
     publisher.thread.start()
     try:
         assert entered.wait(3)
@@ -442,12 +501,18 @@ def test_publisher_cancellation_during_fallback_does_not_launch_a_late_encoder(t
     assert not publisher.thread.is_alive() and publisher.online is False
 
 
-def test_expired_publisher_hardware_failure_allows_retry_after_a_transient_outage(tmp_path, monkeypatch):
+def test_expired_publisher_hardware_failure_allows_retry_after_a_transient_outage(
+    tmp_path, monkeypatch
+):
     config = CameraConfig(id="retry", name="Transient failure", backend="synthetic")
     hardware = selection_for(config)
     inputs, outputs = encoder_args("libx264", config.width, config.height, config.fps)
     replacement = EncoderSelection(
-        codec="libx264", hardware=False, requested="auto", input_args=inputs, output_args=outputs,
+        codec="libx264",
+        hardware=False,
+        requested="auto",
+        input_args=inputs,
+        output_args=outputs,
     )
     clock = [1000.0]
     phases, selections, children, retries = [], [], [], []
@@ -491,8 +556,11 @@ def test_expired_publisher_hardware_failure_allows_retry_after_a_transient_outag
     ready = threading.Event()
     ready.set()
     publisher.camera = SimpleNamespace(
-        config=config, encoding_ready=ready, encoding_selection=hardware,
-        encoders={"encoders": ["h264_nvenc", "libx264"]}, frame=frame,
+        config=config,
+        encoding_ready=ready,
+        encoding_selection=hardware,
+        encoders={"encoders": ["h264_nvenc", "libx264"]},
+        frame=frame,
     )
     publisher.settings = Settings(data_dir=tmp_path)
     publisher.halt = AdvancingBackoff()
@@ -501,7 +569,9 @@ def test_expired_publisher_hardware_failure_allows_retry_after_a_transient_outag
     monkeypatch.setattr("campix.mediamtx.time", SimpleNamespace(monotonic=lambda: clock[0]))
     monkeypatch.setattr("campix.mediamtx.subprocess.Popen", launch)
     monkeypatch.setattr("campix.mediamtx.select_encoder", select)
-    monkeypatch.setattr("campix.mediamtx.terminate_process", lambda child: setattr(child, "terminated", True))
+    monkeypatch.setattr(
+        "campix.mediamtx.terminate_process", lambda child: setattr(child, "terminated", True)
+    )
     publisher._run()
     assert phases == ["h264_nvenc", "libx264", "h264_nvenc"]
     assert selections == [frozenset({"h264_nvenc"})]

@@ -144,7 +144,7 @@ MJPEG is simple and robust but consumes comparatively high bandwidth. A universa
 
 ### Zero-copy and encoder capability detection
 
-Do not blindly launch `ffmpeg -c:v libx264` for every platform. A startup probe should examine V4L2 formats, M2M codecs, DMABUF, and libcamera streams. Pi 4 might then select native hardware H.264, while Pi 5 intentionally uses low-latency software encoding. Current CamPiX implements bounded FFmpeg hardware-encoder/profile probes and automatic hardware preference with software fallback. Direct native CSI encoding, DMABUF and shared encoded streams remain proposed improvements. [Implemented architecture](ARCHITECTURE.md).
+Do not blindly launch `ffmpeg -c:v libx264` for every platform. A startup probe should examine V4L2 formats, M2M codecs, DMABUF, and libcamera streams. Pi 4 might then select native hardware H.264, while Pi 5 intentionally uses low-latency software encoding. Current CamPiX implements bounded FFmpeg hardware-encoder/profile probes and automatic hardware preference with software fallback. Native Picamera2 output, matching H.264 UVC passthrough and a shared encoded stream now feed copy-only live and recording consumers. Raw-frame zero-copy is limited to the actual Picamera2 V4L2 DMABUF path or a successfully probed hardware JPEG decoder/encoder pair; physical qualification remains separate. [Implemented architecture](ARCHITECTURE.md).
 
 ### Full multiple-camera support
 
