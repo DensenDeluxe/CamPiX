@@ -6,6 +6,17 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+EncoderName = Literal[
+    "auto",
+    "libx264",
+    "h264_nvenc",
+    "h264_qsv",
+    "h264_amf",
+    "h264_videotoolbox",
+    "h264_vaapi",
+    "h264_v4l2m2m",
+]
+
 
 def directshow_source_valid(source: str) -> bool:
     """FFmpeg splits DirectShow input on ":"; a name must not add audio or other devices."""
@@ -32,7 +43,7 @@ class CameraConfig(StrictModel):
     motion_pixel_delta: int = Field(25, ge=5, le=200)
     motion_frames: int = Field(3, ge=1, le=30)
     motion_postroll: int = Field(10, ge=1, le=300)
-    encoder: Literal["auto", "libx264", "h264_v4l2m2m"] = "auto"
+    encoder: EncoderName = "auto"
     controls: dict[str, float | int | bool] = Field(default_factory=dict, max_length=32)
 
     @model_validator(mode="after")
@@ -85,7 +96,7 @@ class CameraPatch(StrictModel):
     motion_enabled: bool | None = None
     motion_threshold: float | None = Field(None, ge=0.005, le=0.9)
     preroll_seconds: int | None = Field(None, ge=0, le=10)
-    encoder: Literal["auto", "libx264", "h264_v4l2m2m"] | None = None
+    encoder: EncoderName | None = None
 
 
 class UserCreate(StrictModel):

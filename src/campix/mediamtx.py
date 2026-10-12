@@ -7,11 +7,14 @@ import secrets
 import socket
 import subprocess
 import threading
+import time
+from dataclasses import replace
 from urllib.parse import urlsplit
 
 import httpx
 
 from .capture import CaptureError, terminate_process
+from .encoding import EncoderUnavailable, encoder_args, select_encoder
 from .processes import NO_WINDOW
 
 MEDIAMTX_VERSION = "1.21.2"
@@ -64,22 +67,70 @@ class Publisher:
         self.proc = None
         self.error = None
         self.online = False
+        self.selection = None
+        self.failed_encoders = set()
+        self.failed_until = {}
+        self.spawn_lock = threading.Lock()
         self.thread = threading.Thread(
             target=self._run, name=f"publish-{camera.config.id}", daemon=True
         )
         self.thread.start()
 
     def _run(self):
+        self.failed_encoders = getattr(self, "failed_encoders", set())
+        self.failed_until = getattr(self, "failed_until", {})
+        self.spawn_lock = getattr(self, "spawn_lock", threading.Lock())
         while not self.halt.is_set():
             try:
+                for failed, expires in list(self.failed_until.items()):
+                    if time.monotonic() >= expires:
+                        self.failed_encoders.discard(failed)
+                        del self.failed_until[failed]
                 cfg = self.camera.config
-                codec = "libx264" if cfg.encoder == "auto" else cfg.encoder
+                ready = getattr(self.camera, "encoding_ready", None)
+                if ready is not None and not ready.is_set():
+                    self.halt.wait(0.1)
+                    continue
+                self.selection = getattr(self.camera, "encoding_selection", None)
+                if ready is not None and self.selection is None:
+                    raise CaptureError("No usable encoder for the live profile")
+                if self.failed_encoders and cfg.encoder == "auto":
+                    self.selection = select_encoder(
+                        self.settings.ffmpeg,
+                        "auto",
+                        width=cfg.width,
+                        height=cfg.height,
+                        fps=cfg.fps,
+                        capabilities=self.camera.encoders,
+                        excluded=self.failed_encoders,
+                        cancel=self.halt,
+                    )
+                    self.selection = replace(
+                        self.selection,
+                        fallback_reason="Previous publishing session failed; using "
+                        + self.selection.codec,
+                    )
+                if self.halt.is_set():
+                    break
+                codec = (
+                    self.selection.codec
+                    if self.selection
+                    else ("libx264" if cfg.encoder == "auto" else cfg.encoder)
+                )
+                input_args, output_args = (
+                    (self.selection.input_args, self.selection.output_args)
+                    if self.selection
+                    else encoder_args(
+                        codec, getattr(cfg, "width", 640), getattr(cfg, "height", 480), cfg.fps
+                    )
+                )
                 command = [
                     self.settings.ffmpeg,
                     "-nostdin",
                     "-hide_banner",
                     "-loglevel",
                     "error",
+                    *input_args,
                     # This pipe has a known codec; probing a live frame backlog delays startup.
                     "-probesize",
                     "32",
@@ -98,23 +149,9 @@ class Publisher:
                     "-i",
                     "pipe:0",
                     "-an",
-                    "-c:v",
-                    codec,
+                    *output_args,
                 ]
-                if codec == "libx264":
-                    command += [
-                        "-preset",
-                        "veryfast",
-                        "-tune",
-                        "zerolatency",
-                        "-profile:v",
-                        "baseline",
-                    ]
                 command += [
-                    "-pix_fmt",
-                    "yuv420p",
-                    "-g",
-                    str(cfg.fps),
                     "-force_key_frames",
                     "expr:gte(t,n_forced*1)",
                     "-fps_mode",
@@ -127,13 +164,16 @@ class Publisher:
                     "tcp",
                     self.settings.mediamtx_rtsp.rstrip("/") + "/" + cfg.id,
                 ]
-                self.proc = subprocess.Popen(
-                    command,
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    creationflags=NO_WINDOW,
-                )
+                with self.spawn_lock:
+                    if self.halt.is_set():
+                        break
+                    self.proc = subprocess.Popen(
+                        command,
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        creationflags=NO_WINDOW,
+                    )
                 sequence = -1
                 while not self.halt.is_set():
                     current, jpeg = self.camera.frame(sequence, timeout=3)
@@ -145,8 +185,18 @@ class Publisher:
                     self.proc.stdin.write(jpeg)
                     self.proc.stdin.flush()
                     self.online, self.error = True, None
-            except (CaptureError, OSError):
+            except (CaptureError, EncoderUnavailable, OSError) as exc:
                 self.online, self.error = False, "Media publisher disconnected; retrying"
+                if (
+                    isinstance(exc, OSError)
+                    and self.selection
+                    and self.selection.hardware
+                    and cfg.encoder == "auto"
+                    and not self.halt.is_set()
+                ):
+                    self.failed_encoders.add(self.selection.codec)
+                    self.failed_until[self.selection.codec] = time.monotonic() + 30
+                    self.error = "Hardware publishing session failed; retrying another encoder"
             finally:
                 self.online = False
                 if self.proc:
@@ -159,9 +209,10 @@ class Publisher:
             self.halt.wait(3)
 
     def stop(self):
-        self.halt.set()
-        if self.proc:
-            terminate_process(self.proc)
+        with self.spawn_lock:
+            self.halt.set()
+            if self.proc:
+                terminate_process(self.proc)
         self.thread.join(timeout=10)
 
 
@@ -240,10 +291,10 @@ class MediaPlane:
                         publisher.stop()
                         del self.publishers[camera_id]
                 for camera_id, camera in current.items():
-                    codec = "libx264" if camera.config.encoder == "auto" else camera.config.encoder
                     if (
                         camera_id not in self.publishers
-                        and codec in self.cameras.encoders["encoders"]
+                        and camera.encoding_ready.is_set()
+                        and camera.encoding_selection is not None
                     ):
                         self.publishers[camera_id] = Publisher(camera, self.settings)
                 headers = (
@@ -278,7 +329,13 @@ class MediaPlane:
             "version": MEDIAMTX_VERSION if self.settings.mediamtx_binary else None,
             "error": self.last_error,
             "publishers": {
-                key: {"online": pub.online and key in self.ready_paths, "error": pub.error}
+                key: {
+                    "online": pub.online and key in self.ready_paths,
+                    "error": pub.error,
+                    "encoder": pub.selection.codec if pub.selection else None,
+                    "hardware": bool(pub.selection and pub.selection.hardware),
+                    "fallback_reason": pub.selection.fallback_reason if pub.selection else None,
+                }
                 for key, pub in self.publishers.copy().items()
             },
             "network_note": "Managed WebRTC ICE listens on loopback; configure external MediaMTX with reachable ICE/TURN for LAN/WAN.",
@@ -341,8 +398,13 @@ class MediaPlane:
                         headers=headers,
                         content=await request.body() if request.method != "GET" else None,
                     ) as response:
-                        if response.headers.get("content-encoding", "identity").lower() != "identity":
-                            raise CaptureError("MediaMTX response uses unsupported content encoding")
+                        if (
+                            response.headers.get("content-encoding", "identity").lower()
+                            != "identity"
+                        ):
+                            raise CaptureError(
+                                "MediaMTX response uses unsupported content encoding"
+                            )
                         async for chunk in response.aiter_bytes():
                             if len(content) + len(chunk) > limit:
                                 raise CaptureError("MediaMTX response exceeds its size limit")

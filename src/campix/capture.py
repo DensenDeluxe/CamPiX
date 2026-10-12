@@ -14,7 +14,11 @@ from PIL import Image, ImageDraw, ImageEnhance
 from .models import CameraConfig, ControlPatch
 from .processes import NO_WINDOW, bounded_output
 
-DSHOW_MODE = re.compile(r"min s=(?P<low>\d+x\d+) fps=\S+ max s=(?P<high>\d+x\d+)")
+DSHOW_MODE = re.compile(
+    r"(?:(?P<format_type>pixel_format|vcodec)=(?P<format>\w+)\s+)?"
+    r"min s=(?P<low>\d+x\d+) fps=(?P<min_fps>\S+) "
+    r"max s=(?P<high>\d+x\d+) fps=(?P<max_fps>\S+)"
+)
 DSHOW_CLOCK_TOLERANCE_SECONDS = 0.005
 
 
@@ -41,6 +45,10 @@ class Backend:
 
     def read(self) -> Image.Image:
         raise NotImplementedError
+
+    def read_jpeg(self) -> bytes | None:
+        """Return an already encoded frame when the capture adapter supplies JPEG."""
+        return None
 
     def apply(self, values):
         ControlPatch(**values)
@@ -282,7 +290,14 @@ class NetworkBackend(Backend):
     def output_arguments(self):
         return []
 
+    def codec_arguments(self):
+        # Apply profile quality once in the pipe encoder; the runtime passes those
+        # JPEG bytes through. FFmpeg's quantizer scale differs from Pillow quality.
+        quantizer = max(2, min(31, round((100 - self.config.quality) / 6)))
+        return ["-c:v", "mjpeg", "-q:v", str(quantizer)]
+
     def open(self):
+        video_filter = self.video_filter()
         command = [
             self.ffmpeg,
             "-nostdin",
@@ -291,16 +306,10 @@ class NetworkBackend(Backend):
             "error",
             *self.input_arguments(),
             "-an",
-            "-vf",
-            self.video_filter(),
+            *(["-vf", video_filter] if video_filter else []),
             "-f",
             "image2pipe",
-            "-c:v",
-            "mjpeg",
-            # Frames are re-encoded at the profile quality. FFmpeg's default rate control
-            # would quantize this local pipe heavily (about q=25 at 10 fps).
-            "-q:v",
-            "3",
+            *self.codec_arguments(),
             *self.output_arguments(),
             "pipe:1",
         ]
@@ -318,13 +327,19 @@ class NetworkBackend(Backend):
     def _read_jpeg(self, process=None, buffer=None):
         process = process if process is not None else self.proc
         buffer = buffer if buffer is not None else self.buffer
+        start = -1
+        scan_from = 0
         while True:
-            start = buffer.find(b"\xff\xd8")
-            end = buffer.find(b"\xff\xd9", start + 2) if start >= 0 else -1
+            if start < 0:
+                start = buffer.find(b"\xff\xd8", scan_from)
+            end = buffer.find(b"\xff\xd9", max(start + 2, scan_from)) if start >= 0 else -1
             if start >= 0 and end > start:
                 data = bytes(buffer[start : end + 2])
                 del buffer[: end + 2]
                 return data
+            # Re-scan only the final overlap byte and new input. Searching the entire
+            # growing JPEG on every pipe chunk makes large 4K frames quadratic work.
+            scan_from = max(0, len(buffer) - 1)
             # read(n) waits to fill n bytes. read1() returns bytes already delivered,
             # including small low-FPS images, without waiting for a later frame.
             read = getattr(process.stdout, "read1", process.stdout.read)
@@ -336,8 +351,13 @@ class NetworkBackend(Backend):
             if len(buffer) > 16 * 1024 * 1024:
                 raise CaptureError(f"{self.model} frame exceeds the supported size")
 
+    def read_jpeg(self):
+        jpeg = self._read_jpeg()
+        self.frame_received_at = time.monotonic()
+        return jpeg
+
     def read(self):
-        with Image.open(io.BytesIO(self._read_jpeg())) as image:
+        with Image.open(io.BytesIO(self.read_jpeg())) as image:
             return image.convert("RGB")
 
     def close(self):
@@ -365,9 +385,15 @@ class DirectShowBackend(NetworkBackend):
         self.latest_jpeg = None
         self.reader_error = None
         self.dropped_frames = 0
+        self.native_profiles = []
+        self.source_fps = None
+        self.source_format = None
+        self.source_format_type = None
+        self.jpeg_copy = False
 
     def native_modes(self):
         """Return the device's discrete capture sizes; listing them opens no capture stream."""
+        self.native_profiles.clear()
         command = [self.ffmpeg, "-hide_banner", "-nostdin", "-list_options", "true", "-f", "dshow"]
         try:
             listing = bounded_output(
@@ -379,8 +405,41 @@ class DirectShowBackend(NetworkBackend):
         for match in DSHOW_MODE.finditer(listing):
             if match["low"] != match["high"]:
                 return None  # A continuous range: any profile size may be native.
-            sizes.add(tuple(int(part) for part in match["low"].split("x")))
+            size = tuple(int(part) for part in match["low"].split("x"))
+            sizes.add(size)
+            try:
+                low, high = float(match["min_fps"]), float(match["max_fps"])
+            except ValueError:
+                continue
+            if 0 < low <= high <= 240 and math.isfinite(high):
+                self.native_profiles.append({
+                    "size": size, "min_fps": low, "max_fps": high,
+                    "format_type": match["format_type"], "format": match["format"],
+                })
         return sorted(sizes, key=lambda size: (size[0] * size[1], size)) or None
+
+    def _negotiate_source(self):
+        profiles = [p for p in self.native_profiles if p["size"] == self.source_size]
+        if not profiles:
+            return
+
+        def preferred(profile):
+            rate = min(max(self.config.fps, profile["min_fps"]), profile["max_fps"])
+            pixel_cost = 0 if profile["format"] == "mjpeg" else (
+                1 if profile["format"] == "nv12" else 2
+            )
+            return (max(0, self.config.fps - rate), abs(rate - self.config.fps), pixel_cost)
+
+        selected = min(profiles, key=preferred)
+        self.source_fps = min(
+            max(self.config.fps, selected["min_fps"]), selected["max_fps"]
+        )
+        self.source_format_type, self.source_format = selected["format_type"], selected["format"]
+        self.jpeg_copy = (
+            self.source_format_type == "vcodec" and self.source_format == "mjpeg"
+            and self.source_size == (self.config.width, self.config.height)
+            and self.source_fps == self.config.fps
+        )
 
     def source_mode(self, width, height):
         """Use the profile size natively, else the smallest mode covering it."""
@@ -395,9 +454,16 @@ class DirectShowBackend(NetworkBackend):
         mode = ["-video_size", "{}x{}".format(*self.source_size)] if self.source_size else []
         # One argument and no shell; validation rejects ":" so no audio device can be added.
         source = ["-i", "video=" + self.config.source]
-        return ["-f", "dshow", "-rtbufsize", "32M", *mode, *source]
+        rate = ["-framerate", f"{self.source_fps:g}"] if self.source_fps else []
+        native_format = (
+            ["-" + self.source_format_type, self.source_format]
+            if self.source_format_type and self.source_format else []
+        )
+        return ["-f", "dshow", "-rtbufsize", "32M", *mode, *rate, *native_format, *source]
 
     def video_filter(self):
+        if self.jpeg_copy:
+            return None
         # Requesting a frame rate the device does not list would fail, so a filter reduces
         # it before scaling. A source mode can differ in shape: pad rather than distort.
         width, height = self.config.width, self.config.height
@@ -415,12 +481,21 @@ class DirectShowBackend(NetworkBackend):
     def output_arguments(self):
         return ["-fps_mode", "passthrough", "-flush_packets", "1"]
 
+    def codec_arguments(self):
+        return ["-c:v", "copy"] if self.jpeg_copy else super().codec_arguments()
+
     def open(self):
         self.modes = self.native_modes()
         profile = (self.config.width, self.config.height)
         self.source_size = self.source_mode(*profile) if self.modes else profile
+        self._negotiate_source()
         self._spawn()
         self.capabilities["modes"] = [f"{width}x{height}" for width, height in self.modes or ()]
+        self.capabilities.update(
+            source_fps=self.source_fps, source_format=self.source_format,
+            jpeg_passthrough=self.jpeg_copy,
+            jpeg_quality="source" if self.jpeg_copy else self.config.quality,
+        )
         if self.modes:
             return
         try:
@@ -440,6 +515,12 @@ class DirectShowBackend(NetworkBackend):
             # Unknown modes and no frame at the profile size: use the device's default mode.
             self._stop_stream()
             self.source_size = None
+            self.source_fps = self.source_format = self.source_format_type = None
+            self.jpeg_copy = False
+            self.capabilities.update(
+                source_fps=None, source_format=None, jpeg_passthrough=False,
+                jpeg_quality=self.config.quality,
+            )
             self._spawn()
 
     def _spawn(self):
@@ -497,7 +578,7 @@ class DirectShowBackend(NetworkBackend):
                 return
             stopped.wait(0.5)
 
-    def read(self):
+    def read_jpeg(self):
         stopped = self.reader_stop
         with self.frames:
             self.frames.wait_for(
@@ -509,8 +590,7 @@ class DirectShowBackend(NetworkBackend):
             self.frame_received_at = self.last_frame
             if time.monotonic() - self.last_frame > 5:
                 raise CaptureError("DirectShow camera has no current frame")
-        with Image.open(io.BytesIO(jpeg)) as image:
-            return image.convert("RGB")
+        return jpeg
 
     def close(self):
         # A profile/service cancellation is durable; a mode-negotiation retry only

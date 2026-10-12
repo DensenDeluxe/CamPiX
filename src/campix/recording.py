@@ -1,37 +1,25 @@
 from __future__ import annotations
 
 import queue
-import shutil
 import subprocess
 import threading
 import time
 
 from .capture import terminate_process
+from .encoding import encoder_args, probe_encoders
 from .processes import NO_WINDOW
 
 
 def encoder_probe(ffmpeg):
-    if not shutil.which(ffmpeg):
-        return {"available": False, "encoders": [], "hardware_verified": False}
-    try:
-        result = subprocess.run(
-            [ffmpeg, "-hide_banner", "-encoders"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=True,
-            creationflags=NO_WINDOW,
-        )
-        encoders = [name for name in ("libx264", "h264_v4l2m2m") if name in result.stdout]
-        return {"available": bool(encoders), "encoders": encoders, "hardware_verified": False}
-    except (OSError, subprocess.SubprocessError):
-        return {"available": False, "encoders": [], "hardware_verified": False}
+    return probe_encoders(ffmpeg)
 
 
 class Recorder:
     """One bounded writer per camera; FFmpeg backpressure never stalls capture."""
 
-    def __init__(self, config, settings, store, preroll, trigger="manual", duration=None):
+    def __init__(
+        self, config, settings, store, preroll, trigger="manual", duration=None, *, selection=None
+    ):
         self.config, self.settings, self.store = config, settings, store
         self.media_id, self.path = store.reserve("mp4")
         self.partial = self.path.with_suffix(".mp4.partial")
@@ -47,13 +35,25 @@ class Recorder:
         self.error = None
         self.result = None
         self.trigger = trigger
-        codec = "libx264" if config.encoder == "auto" else config.encoder
+        self.selection = selection
+        codec = (
+            selection.codec
+            if selection
+            else ("libx264" if config.encoder == "auto" else config.encoder)
+        )
+        width, height = getattr(config, "width", 640), getattr(config, "height", 480)
+        input_args, output_args = (
+            (selection.input_args, selection.output_args)
+            if selection
+            else encoder_args(codec, width, height, config.fps)
+        )
         command = [
             settings.ffmpeg,
             "-nostdin",
             "-hide_banner",
             "-loglevel",
             "error",
+            *input_args,
             "-f",
             "image2pipe",
             "-framerate",
@@ -63,14 +63,9 @@ class Recorder:
             "-i",
             "pipe:0",
             "-an",
-            "-c:v",
-            codec,
+            *output_args,
         ]
-        if codec == "libx264":
-            command += ["-preset", "veryfast", "-tune", "zerolatency", "-crf", "23"]
         command += [
-            "-pix_fmt",
-            "yuv420p",
             "-movflags",
             "+faststart",
             "-f",

@@ -15,7 +15,7 @@ from campix import capture, provision, runtime
 from campix.config import Settings
 from campix.db import Database
 from campix.models import CameraConfig
-from campix.processes import NO_WINDOW
+from campix.processes import NO_WINDOW, NO_WINDOW_SUSPENDED
 from campix.security import Auth
 
 from .conftest import signin
@@ -59,9 +59,10 @@ def windows_inventory(monkeypatch, listing):
     return result
 
 
-def camera(source="Integrated Camera", width=640, height=480):
+def camera(source="Integrated Camera", width=640, height=480, fps=10, quality=80):
     return CameraConfig(
-        id="webcam", name="Webcam", backend="dshow", source=source, width=width, height=height
+        id="webcam", name="Webcam", backend="dshow", source=source, width=width, height=height,
+        fps=fps, quality=quality,
     )
 
 
@@ -198,7 +199,7 @@ def test_device_list_output_is_bounded_and_windowless(monkeypatch):
         "-i",
         "dummy",
     ]
-    assert kwargs["creationflags"] == NO_WINDOW and "shell" not in kwargs
+    assert kwargs["creationflags"] == NO_WINDOW_SUSPENDED and "shell" not in kwargs
 
 
 def test_hung_device_list_is_stopped(monkeypatch):
@@ -422,6 +423,46 @@ def test_source_mode_prefers_native_then_the_smallest_covering_mode():
     assert backend.source_mode(3840, 2160) == (1920, 1080)
 
 
+@pytest.mark.parametrize("target,source_rate", [(10, 30), (30, 30), (60, 30)])
+def test_directshow_negotiates_only_reported_source_rates(monkeypatch, target, source_rate):
+    backend = capture.make_backend(camera(fps=target), "ffmpeg")
+    monkeypatch.setattr(capture, "bounded_output", lambda *args, **kwargs: OPTIONS.encode())
+    backend.modes = backend.native_modes()
+    backend.source_size = (640, 480)
+    backend._negotiate_source()
+    arguments = backend.input_arguments()
+    assert arguments[arguments.index("-framerate") + 1] == str(source_rate)
+    assert arguments[arguments.index("-pixel_format") + 1] == "nv12"
+    assert backend.source_fps == source_rate
+    assert not backend.jpeg_copy
+
+
+def test_directshow_uses_native_4k60_mjpeg_without_transcoding_only_when_reported(monkeypatch):
+    listing = b"[dshow] vcodec=mjpeg min s=3840x2160 fps=60 max s=3840x2160 fps=60"
+    backend = capture.make_backend(camera(width=3840, height=2160, fps=60), "ffmpeg")
+    monkeypatch.setattr(capture, "bounded_output", lambda *args, **kwargs: listing)
+    backend.modes = backend.native_modes()
+    backend.source_size = (3840, 2160)
+    backend._negotiate_source()
+    arguments = backend.input_arguments()
+    assert arguments[arguments.index("-framerate") + 1] == "60"
+    assert arguments[arguments.index("-vcodec") + 1] == "mjpeg"
+    assert backend.video_filter() is None
+    assert backend.codec_arguments() == ["-c:v", "copy"]
+    # A resized or rate-reduced stream needs filtering and cannot claim passthrough.
+    backend.config.fps = 30
+    backend._negotiate_source()
+    assert backend.source_fps == 60
+    assert not backend.jpeg_copy
+    assert backend.video_filter().startswith("select=")
+
+
+@pytest.mark.parametrize("quality,quantizer", [(20, "13"), (80, "3"), (95, "2")])
+def test_pipe_jpeg_quality_is_applied_once_to_the_ffmpeg_encoder(quality, quantizer):
+    backend = capture.make_backend(camera(quality=quality), "ffmpeg")
+    assert backend.codec_arguments() == ["-c:v", "mjpeg", "-q:v", quantizer]
+
+
 def test_directshow_backend_requests_a_native_mode_and_reduces_the_rate_first(monkeypatch):
     process = LiveFFmpeg()
     launched = launch(monkeypatch, process)
@@ -477,6 +518,32 @@ def test_unknown_modes_try_the_profile_size_then_the_default_mode(monkeypatch):
     assert "force_original_aspect_ratio=decrease" in video_filter
     assert "pad=640:480" in video_filter
     assert backend.capabilities["modes"] == []
+
+
+def test_unknown_default_mode_fallback_discards_previous_rate_codec_and_copy(monkeypatch):
+    launched = launch(monkeypatch, b"", jpeg(), modes=None)
+    backend = capture.make_backend(camera(), "ffmpeg")
+
+    def partial_listing():
+        backend.native_profiles = [{
+            "size": (640, 480), "min_fps": 10, "max_fps": 10,
+            "format_type": "vcodec", "format": "mjpeg",
+        }]
+        return None
+
+    monkeypatch.setattr(backend, "native_modes", partial_listing)
+    backend.open()
+    try:
+        assert backend.read_jpeg() == jpeg()
+        native, fallback = (command for command, _ in launched)
+        assert native[native.index("-c:v") + 1] == "copy"
+        assert "-framerate" not in fallback and "-vcodec" not in fallback
+        assert fallback[fallback.index("-c:v") + 1] == "mjpeg"
+        assert fallback[fallback.index("-vf") + 1].startswith("select=")
+        assert not backend.capabilities["jpeg_passthrough"]
+        assert backend.capabilities["source_fps"] is None
+    finally:
+        backend.close()
 
 
 def test_unavailable_directshow_camera_reports_capture_error(monkeypatch):
@@ -574,6 +641,23 @@ def test_directshow_drains_backlog_and_decodes_only_the_newest_frame(monkeypatch
         image = backend.read()
         assert image.getpixel((0, 0))[0] == pytest.approx(180, abs=2)
         assert backend.dropped_frames == 8
+        assert backend.latest_jpeg is None
+    finally:
+        backend.close()
+    assert not backend.reader_thread.is_alive()
+
+
+def test_directshow_delivers_native_jpeg_without_pixel_decode(monkeypatch):
+    process = LiveFFmpeg()
+    launch(monkeypatch, process)
+    backend = capture.make_backend(camera(), "ffmpeg")
+    payload = jpeg()
+    monkeypatch.setattr(Image, "open", lambda *args: pytest.fail("Native JPEG was decoded"))
+    backend.open()
+    try:
+        process.stdout.feed([payload])
+        assert backend.read_jpeg() == payload
+        assert time.monotonic() - backend.frame_received_at < 1
         assert backend.latest_jpeg is None
     finally:
         backend.close()

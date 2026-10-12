@@ -13,6 +13,41 @@ from campix.processes import NO_WINDOW
 requires_ffmpeg = pytest.mark.skipif(not shutil.which("ffmpeg"), reason="FFmpeg required")
 
 
+def test_jpeg_marker_search_is_linear_for_large_fragmented_frames():
+    class CountedBuffer(bytearray):
+        scanned_bytes = 0
+
+        def find(self, marker, start=0, end=None):
+            bound = len(self) if end is None else end
+            self.scanned_bytes += max(0, bound - start)
+            return super().find(marker, start, bound)
+
+    payload = b"\xff\xd8" + b"x" * (8 * 1024 * 1024) + b"\xff\xd9"
+    buffer = CountedBuffer()
+    backend = unopened_backend()
+    assert backend._read_jpeg(ControlledProcess(io.BytesIO(payload)), buffer) == payload
+    # Searching every accumulated chunk again grows quadratically and throttles 4K.
+    assert buffer.scanned_bytes < len(payload) * 2
+    assert not buffer
+
+
+def test_jpeg_parser_retains_markers_split_across_pipe_chunks():
+    class FragmentedPipe:
+        chunks = iter([b"prefix\xff", b"\xd8pixels\xff", b"\xd9\xff\xd8next\xff\xd9"])
+
+        def read1(self, size):
+            return next(self.chunks, b"")
+
+        read = read1
+
+    backend = unopened_backend()
+    buffer = bytearray()
+    process = ControlledProcess(FragmentedPipe())
+    assert backend._read_jpeg(process, buffer) == b"\xff\xd8pixels\xff\xd9"
+    assert backend._read_jpeg(process, buffer) == b"\xff\xd8next\xff\xd9"
+    assert not buffer
+
+
 def filtered_frames(*filters, fps=10, input_rate=1, duration=2):
     """Exercise the live adapter's filter with generated frames, without opening a device."""
     backend = DirectShowBackend(
@@ -93,16 +128,23 @@ def test_directshow_sampler_resumes_after_the_source_clock_moves_backwards():
     assert all(later - earlier > 10 for earlier, later in zip(levels, levels[1:], strict=False))
 
 
-@pytest.mark.parametrize("fps,expected", [(10, 30), (30, 90)])
+@pytest.mark.parametrize("fps,input_rate,expected", [(10, 30, 30), (30, 30, 90), (60, 60, 180)])
 @requires_ffmpeg
-def test_directshow_sampling_cadence_does_not_drift_with_small_clock_jitter(fps, expected):
+def test_directshow_sampling_cadence_does_not_drift_with_small_clock_jitter(fps, input_rate, expected):
     frames = filtered_frames(
         "settb=1/1000000",
-        "setpts=N/(30*TB)+sin(N*2.39996)*0.002/TB",
+        f"setpts=N/({input_rate}*TB)+sin(N*2.39996)*0.002/TB",
         fps=fps,
-        input_rate=30,
+        input_rate=input_rate,
         duration=3,
     )
+    assert len(frames) == expected
+
+
+@pytest.mark.parametrize("fps,expected", [(30, 30), (60, 60)])
+@requires_ffmpeg
+def test_directshow_sampler_supports_a_reported_60_fps_input_without_a_30_fps_cap(fps, expected):
+    frames = filtered_frames(fps=fps, input_rate=60, duration=1)
     assert len(frames) == expected
 
 

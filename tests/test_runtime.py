@@ -1,3 +1,4 @@
+import io
 import json
 import threading
 import time
@@ -146,7 +147,7 @@ def test_motion_retains_the_previous_frame_when_capture_is_slower_than_analysis(
             except StopIteration:
                 return True
             if value is not None:
-                camera.analysis = np.full((90, 160), value, dtype=np.uint8)
+                camera.analysis = encoded_frame(level=value)
                 camera.analysis_sequence += 1
             return False
 
@@ -175,3 +176,106 @@ def test_capture_age_preserves_pipe_receipt_time_after_processing(manager, monke
     else:
         assert not camera.frame_times and camera.jpeg is None
         assert camera.error == "Capture unavailable (CaptureError); retrying"
+
+
+def encoded_frame(size=(160, 120), level=0):
+    output = io.BytesIO()
+    Image.new("RGB", size, (level, level, level)).save(output, "JPEG")
+    return output.getvalue()
+
+
+def test_capture_preserves_native_jpeg_without_rgb_decode_or_reencoding(manager, monkeypatch):
+    config = CameraConfig(
+        id="passthrough", name="Native JPEG", backend="dshow", source="Webcam",
+        width=160, height=120, motion_enabled=False,
+    )
+    camera = runtime.Camera(config, manager.settings, None, Bus(), {"encoders": []})
+    jpeg = encoded_frame()
+
+    class NativeJPEG(Backend):
+        def read_jpeg(self):
+            self.frame_received_at = time.monotonic()
+            return jpeg
+
+        def read(self):
+            pytest.fail("Native JPEG was unnecessarily decoded into RGB")
+
+    backend = NativeJPEG(config)
+    monkeypatch.setattr(runtime, "make_backend", lambda config, ffmpeg: backend)
+    monkeypatch.setattr(camera.bus, "publish", lambda *args: camera.halt.set())
+    monkeypatch.setattr(Image.Image, "load", lambda *args: pytest.fail("JPEG pixels were decoded"))
+    monkeypatch.setattr(Image.Image, "save", lambda *args, **kwargs: pytest.fail("JPEG was reencoded"))
+    camera._capture()
+    assert camera.jpeg is jpeg
+    assert camera.sequence == 1
+    assert camera.analysis is None
+
+
+def test_motion_decode_does_not_block_native_capture_and_uses_a_bounded_latest_slot(manager, monkeypatch):
+    config = CameraConfig(
+        id="isolated", name="Independent analysis", backend="dshow", source="Webcam",
+        width=160, height=120, fps=60, motion_enabled=True,
+    )
+    camera = runtime.Camera(config, manager.settings, None, Bus(), {"encoders": []})
+    jpeg = encoded_frame()
+    entered, release = threading.Event(), threading.Event()
+
+    class NativeJPEG(Backend):
+        def read_jpeg(self):
+            if camera.halt.wait(1 / config.fps):
+                raise CaptureError("Stopped")
+            self.frame_received_at = time.monotonic()
+            return jpeg
+
+        def read(self):
+            pytest.fail("Native JPEG was decoded by capture")
+
+    def slow_analysis(data):
+        assert data is jpeg
+        entered.set()
+        assert release.wait(5)
+        return np.zeros((90, 160), dtype=np.uint8)
+
+    monkeypatch.setattr(runtime, "make_backend", lambda config, ffmpeg: NativeJPEG(config))
+    monkeypatch.setattr(camera, "_motion_gray", slow_analysis)
+    camera.start()
+    try:
+        assert entered.wait(2)
+        sequence = camera.sequence
+        _, frame = camera.frame(sequence, timeout=1)
+        assert frame is jpeg
+        assert camera.sequence > sequence
+        assert camera.analysis is jpeg
+        assert camera.analysis_sequence == camera.sequence
+    finally:
+        camera.halt.set()
+        release.set()
+        camera.stop()
+    assert not camera.capture_thread.is_alive() and not camera.motion_thread.is_alive()
+
+
+def test_cancelled_native_capture_does_not_emit_a_driver_failure(manager, monkeypatch):
+    config = CameraConfig(
+        id="cancelled", name="Cancelled JPEG", backend="dshow", source="Webcam",
+        width=160, height=120,
+    )
+    camera = runtime.Camera(config, manager.settings, None, Bus(), {"encoders": []})
+    entered = threading.Event()
+    events = []
+
+    class WaitingJPEG(Backend):
+        def read_jpeg(self):
+            entered.set()
+            assert camera.halt.wait(5)
+            raise CaptureError("Capture was cancelled")
+
+    monkeypatch.setattr(runtime, "make_backend", lambda config, ffmpeg: WaitingJPEG(config))
+    monkeypatch.setattr(camera.bus, "publish", lambda *args: events.append(args[0]))
+    camera.start()
+    try:
+        assert entered.wait(2)
+    finally:
+        camera.stop()
+    assert not camera.capture_thread.is_alive()
+    assert camera.status == "stopped"
+    assert "camera.error" not in events

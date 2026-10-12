@@ -63,6 +63,15 @@
     ],
     jpegLive: ["JPEG · Live", "JPEG · Live"],
     autoLive: ["WebRTC → JPEG · Live", "WebRTC → JPEG · Live"],
+    encoder: ["Video-Encoder", "Video encoder"],
+    autoEncoder: [
+      "Automatisch · Hardware bevorzugen",
+      "Automatic · prefer hardware",
+    ],
+    encoderChecking: ["Encoder wird geprüft …", "Checking encoder …"],
+    captureFps: ["Kamera", "Camera"],
+    liveEncoder: ["Live-Encoder", "Live encoder"],
+    preparedEncoder: ["Geprüfter Encoder", "Prepared encoder"],
     fullscreen: ["Vollbild", "Fullscreen"],
     exitFullscreen: ["Vollbild beenden", "Exit fullscreen"],
     fullscreenFallback: [
@@ -240,6 +249,12 @@
     $("#settings-forbidden").hidden = admin();
     $("#apply-controls").disabled =
       !operate() || !active()?.capabilities.controls.length;
+    const camera = active();
+    $("#record-button").disabled =
+      !operate() ||
+      camera?.status !== "online" ||
+      (!camera.recording &&
+        (camera.encoding.preparing || !camera.encoding.selected));
   }
   function translate() {
     document.documentElement.lang = s.lang;
@@ -471,11 +486,19 @@
   }
   function renderCamera() {
     const c = active();
+    const publisher = s.system?.media_plane.publishers?.[c?.id];
     $("#active-camera-name").textContent = c?.name || t("camera");
     $("#camera-state").textContent = c
       ? `${c.status}${c.error ? " · " + c.error : ""}`
       : "—";
-    $("#actual-fps").textContent = c ? `${c.fps} / ${c.fps_target} FPS` : "—";
+    $("#actual-fps").textContent = c
+      ? `${t("captureFps")} ${c.fps} / ${c.fps_target} FPS`
+      : "—";
+    $("#actual-fps").title = publisher?.encoder
+      ? `${t("liveEncoder")}: ${publisher.encoder}${publisher.fallback_reason ? " · " + publisher.fallback_reason : ""}`
+      : c?.encoding.selected
+        ? `${t("preparedEncoder")}: ${c.encoding.selected}${c.encoding.fallback_reason ? " · " + c.encoding.fallback_reason : ""}`
+        : c?.encoding.error || t("encoderChecking");
     $("#actual-resolution").textContent = c ? `${c.width} × ${c.height}` : "—";
     $("#backend-label").textContent = c?.backend || "—";
     $("#sensor-label").textContent = c?.capabilities.model || "—";
@@ -508,6 +531,26 @@
       $("#setting-camera-name").value = c.name;
       resolutionOptions(c, `${c.width}x${c.height}`);
       $("#setting-fps").value = c.fps_target;
+      const encoders = [
+        ...new Set([
+          "auto",
+          "libx264",
+          ...(c.encoding.encoders || []),
+          c.encoding.requested || "auto",
+        ]),
+      ];
+      $("#setting-encoder").replaceChildren(
+        ...encoders.map((codec) => {
+          const option = make(
+            "option",
+            "",
+            codec === "auto" ? t("autoEncoder") : codec,
+          );
+          option.value = codec;
+          return option;
+        }),
+      );
+      $("#setting-encoder").value = c.encoding.requested || "auto";
       $("#setting-preroll").value = c.preroll_seconds;
       $("#setting-motion").checked = c.motion_enabled;
       $("#setting-motion-threshold").value = c.motion_threshold;
@@ -665,7 +708,7 @@
         if (current()) {
           preview.request = null;
           const interval =
-            1000 / Math.max(1, Math.min(30, active().fps_target));
+            1000 / Math.max(1, Math.min(60, active().fps_target));
           preview.timer = setTimeout(
             next,
             ready ? Math.max(0, interval - (performance.now() - started)) : 500,
@@ -970,6 +1013,23 @@
           ["Controls", c.capabilities.controls.join(", ") || "—"],
           ["Hardware verified", c.encoding.hardware_verified ? "yes" : "no"],
           ["Encoders", c.encoding.encoders.join(", ") || "—"],
+          [
+            "Selected encoder",
+            c.encoding.selected || c.encoding.error || t("encoderChecking"),
+          ],
+          ["Hardware encoding", c.encoding.selected_hardware ? "yes" : "no"],
+          ["Profile probe passed", c.encoding.profile_tested ? "yes" : "no"],
+          ["Encoder fallback", c.encoding.fallback_reason || "—"],
+          [
+            t("liveEncoder"),
+            s.system?.media_plane.publishers?.[c.id]?.encoder || "—",
+          ],
+          [
+            "Live encoder fallback",
+            s.system?.media_plane.publishers?.[c.id]?.fallback_reason || "—",
+          ],
+          ["Capture processing (ms)", c.capture_processing_ms ?? "—"],
+          ["Skipped capture frames", c.capture_dropped_frames],
           ["Test status", c.capabilities.test_status || "unverified"],
           ["Motion", t(c.motion_enabled ? "enabled" : "disabled")],
           ["Dropped recording frames", c.dropped_frames],
@@ -1315,6 +1375,7 @@
       width,
       height,
       fps: Number($("#setting-fps").value),
+      encoder: $("#setting-encoder").value,
       preroll_seconds: Number($("#setting-preroll").value),
       motion_enabled: $("#setting-motion").checked,
       motion_threshold: Number($("#setting-motion-threshold").value),

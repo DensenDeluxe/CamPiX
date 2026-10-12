@@ -22,7 +22,8 @@ Evidence snapshot: 11 October 2026. **Integrated software release candidate; no 
 | Branding and modern web UI                                    | Supplied graphics, English/German localization, responsive layout, dark/light themes; vanilla JavaScript, not TypeScript/PWA/Web Components.                                          |
 | Debian/OCI/CI/systemd                                         | Build and operations files available; evidence below, no automatic publication.                                                                                                       |
 | All-in-one installation                                       | Unix/PowerShell bootstraps, host inventory, native/portable profiles, secure terminal setup, and managed startup implemented; target-host and hardware qualification remain separate. |
-| Hardware encoding, UVC passthrough, DMABUF                    | Outstanding; `auto` uses software encoding and `hardware_verified` remains `false`.                                                                                                   |
+| Hardware H.264 encoding                                       | Profile-probed FFmpeg NVENC/QSV/AMF/VideoToolbox/VAAPI/V4L2 M2M with software fallback; local NVENC/QSV usability measured; physical qualification remains separate.                  |
+| Compressed capture, shared encoded streams, DMABUF            | Matching DirectShow MJPEG copy implemented; native CSI encoding, H.264 UVC passthrough, shared encoder/fanout and zero-copy remain outstanding.                                       |
 | AI/TFLite/Hailo/IMX500, vendor GStreamer                      | Not implemented; no simulated detections or arbitrary executable pipelines.                                                                                                           |
 | ONVIF and full external hook/plugin system                    | Not implemented.                                                                                                                                                                      |
 | MMAL/FIFO compatibility                                       | Authenticated JPEG/status/`im`/`ca` HTTP facade only; no complete legacy daemon or macro import.                                                                                      |
@@ -190,6 +191,31 @@ The existing fullscreen trigger was an ambiguous icon outside the fullscreen ele
 The installed Chrome browser suite recorded **17 passes and no skips**, including five fullscreen regression cases and real MediaMTX v1.21.2 WebRTC/HLS integration. The WebRTC-to-JPEG fallback retains fullscreen. Media testing used a separate temporary loopback instance and ICE listener because the installed service occupied the managed ports; that deployment was not stopped or changed, and all test processes were cleaned up. Sources were explicitly synthetic. Mobile portrait/landscape layouts and unavailable/denied APIs were exercised in desktop Chrome, rather than on physical mobile devices.
 
 Lock consistency, JavaScript syntax, documentation links, formatting, and diff checks passed. Python/service sources are unchanged; the Python suite and package builds were not rerun for this UI correction. Safari/native HLS fullscreen, physical mobile browsers, and an installed-release update remain unverified. No dependency, schema, commit, publication, or deployment change was made.
+
+## Hardware encoding and high-rate capture — 12 October 2026
+
+Automatic H.264 selection now tries profile-probed hardware encoders before software `libx264`. NVENC and hardware-only QSV initialized successfully on this Windows host; AMD AMF did not. Other platform paths are implemented and failure-tested, rather than locally hardware-qualified. Camera/encoder/display capabilities remain separate. The capture path preserves matching JPEG packets, performs motion decoding independently, negotiates reported DirectShow rate/format combinations, and scans large JPEGs incrementally.
+
+The host has an NVIDIA GeForce RTX 5070 Ti Laptop GPU, NVIDIA driver 32.0.16.1742, Intel Graphics driver 32.0.101.9033, and FFmpeg 8.1.1. Short generated-input encoder checks produced and decoded 360 H.264 constrained-baseline frames per profile, six seconds at `60/1` with no B-frames. JPEG-pipe decode plus NVENC throughput was approximately 488 FPS at 720p, 289 FPS at 1080p and 86.87 FPS at 3840×2160. These repeated generated frames measure encoder pipeline capacity, not physical capture, sustained thermal performance or display latency.
+
+Generated 3840×2160 JPEG capture through actual paced FFmpeg and the runtime delivered 59.99 FPS over five seconds with no reader drops, approximately 0.117 ms capture processing, and pre-roll below 32 MiB. Before incremental parsing, this large-frame case delivered about 39.2 FPS. An independent authenticated browser check used explicitly generated 4K JPEG input, the real application, NVENC, MediaMTX v1.21.2 and Chrome 155.0.8059.39:
+
+| Ten-second synthetic 4K check   | Result                                             |
+| ------------------------------- | -------------------------------------------------- |
+| Capture target / observed       | 60 / 59.98 FPS                                     |
+| WebRTC decoded frames           | 599 in 10.005 seconds, 59.87 FPS                   |
+| Video frame callbacks           | 509, 50.87 callbacks/second                        |
+| Browser-dropped frames          | 58                                                 |
+| JPEG loads in a separate window | 529 in 10.010 seconds, 52.85 loads/second          |
+| Authenticated HLS playlist      | HTTP 200; native HLS browser playback not measured |
+
+This establishes short synthetic 4K60 capture and WebRTC decoding capacity, with actual browser presentation losses. It does not establish perfect 60 FPS presentation, glass-to-glass latency or a physical 4K60 camera.
+
+The actual ACER FHD User Facing webcam (USB 04F2:B831; SunplusIT driver 5.1.36.8, dated 26 November 2024) continued to deliver approximately 16.8 FPS at both 1280×720 and 1920×1080 against a 30 FPS target. Python capture processing was below 0.3 ms with zero reader drops. Direct source isolation at 720p measured 16.718 FPS without sampling, 16.717 with sampling, 16.724 with wall-clock timestamps and 16.735 with YUY2 instead of NV12. Device timestamps independently showed approximately 16.759 FPS and 64 ms frame periods. The advertised 30 FPS mode did not deliver 30 FPS under these conditions. Exposure/low-light causes remain unverified; hardware encoding cannot create additional genuine source frames. Real camera images stayed in memory, and no camera properties or deployed state were changed.
+
+Final verification recorded **355 Python passes and two POSIX-only skips on Windows**, including real FFmpeg/MediaMTX integration, and **19 browser passes with no skips**. Linux/WSL process and encoding tests recorded **51 passes and 11 skips**: ten Windows-specific cases and one real FFmpeg probe because Linux FFmpeg was absent. Process cleanup now owns complete short-lived child trees, including Windows launchers and inherited pipe writers; negative containment, cancellation, timeout and output-limit regressions passed. The initial full run exposed this cleanup defect; a regression reproduced an inherited writer surviving the former runner.
+
+Lock consistency, Ruff 0.17.0, JavaScript syntax, documentation links, formatting and diff checks passed. The wheel matches the current Python/web source bytes and passed an isolated installed-package assets/authentication/JPEG smoke check with hash-verified runtime dependencies. That smoke emitted the existing Starlette TestClient deprecation warning. No dependencies or schema changed. No fresh `.deb`/OCI build, native Pi/macOS hardware test, long soak/disconnect qualification, publication or installed-release replacement was performed. Before source rollback, restore encoder profiles to `auto` or `libx264` so older validators can read them.
 
 ## Remaining production gates
 

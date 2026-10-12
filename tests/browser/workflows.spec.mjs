@@ -91,6 +91,81 @@ test("real capture, recording, library, schedule and persistent profile", async 
   expect(errors).toEqual([]);
 });
 
+test("explicit encoder settings persist and automatic selection reports a tested profile", async ({
+  page,
+}) => {
+  await signin(page);
+  await page.locator(".nav-item[data-view=settings]").click();
+  await page.locator("#setting-encoder").selectOption("libx264");
+  await page.locator("#camera-settings-form button").click();
+  await expect
+    .poll(async () => {
+      const cameras = await (await page.request.get("/api/v1/cameras")).json();
+      return cameras[0].encoding.selected;
+    })
+    .toBe("libx264");
+  await page.reload();
+  await expect(page.locator("#workspace")).toBeVisible();
+  await page.locator(".nav-item[data-view=settings]").click();
+  await expect(page.locator("#setting-encoder")).toHaveValue("libx264");
+  await page.locator("#setting-encoder").selectOption("auto");
+  await page.locator("#camera-settings-form button").click();
+  await expect
+    .poll(async () => {
+      const cameras = await (await page.request.get("/api/v1/cameras")).json();
+      return cameras[0].encoding.profile_tested;
+    })
+    .toBe(true);
+  await page.locator(".nav-item[data-view=devices]").click();
+  await expect(page.locator("#device-list")).toContainText("Selected encoder");
+});
+
+test("live JPEG preview can exceed 30 requests per second without parallel buffering", async ({
+  page,
+}) => {
+  await signin(page);
+  await page.locator(".nav-item[data-view=settings]").click();
+  await page.locator("#setting-fps").fill("60");
+  await page.locator("#camera-settings-form button").click();
+  await expect
+    .poll(async () => {
+      const cameras = await (await page.request.get("/api/v1/cameras")).json();
+      return cameras[0].fps;
+    })
+    .toBeGreaterThan(40);
+  let requests = 0;
+  const pending = new Set();
+  let maximum = 0;
+  page.on("request", (request) => {
+    if (!request.url().endsWith("/preview.jpg")) return;
+    requests++;
+    pending.add(request);
+    maximum = Math.max(maximum, pending.size);
+  });
+  page.on("requestfinished", (request) => {
+    pending.delete(request);
+  });
+  page.on("requestfailed", (request) => {
+    pending.delete(request);
+  });
+  await page.locator(".nav-item[data-view=overview]").click();
+  await expect(page.locator("#transport-select")).toHaveValue("mjpeg");
+  await expect(page.locator("#live-badge")).toBeVisible();
+  const first = requests;
+  await page.waitForTimeout(3000);
+  expect(requests - first).toBeGreaterThan(100);
+  expect(maximum).toBe(1);
+  await page.locator(".nav-item[data-view=settings]").click();
+  await page.locator("#setting-fps").fill("10");
+  await page.locator("#camera-settings-form button").click();
+  await expect
+    .poll(async () => {
+      const cameras = await (await page.request.get("/api/v1/cameras")).json();
+      return cameras[0].fps_target;
+    })
+    .toBe(10);
+});
+
 test("DirectShow webcams are offered and unsafe device names are rejected", async ({
   page,
 }) => {

@@ -19,6 +19,14 @@ SOURCE = Path(__file__).resolve().parents[1] / "src" / "campix"
 LAUNCHERS = {"Popen", "run", "call", "check_call", "check_output"}
 
 
+def wait_for_pid_exit(pid, timeout=1):
+    # A Windows job can report zero active processes while a terminated process's
+    # PID remains briefly visible. Wait for kernel bookkeeping, without killing it.
+    deadline = time.monotonic() + timeout
+    while psutil.pid_exists(pid) and time.monotonic() < deadline:
+        time.sleep(0.005)
+
+
 def test_bounded_output_preserves_binary_stderr_and_discards_stdout():
     command = [
         sys.executable,
@@ -40,6 +48,7 @@ def test_bounded_output_stops_on_small_overrun_before_timeout(tmp_path):
     ]
     with pytest.raises(ValueError, match="output exceeds"):
         processes.bounded_output(command, limit=512, timeout=2)
+    wait_for_pid_exit(int(pid_path.read_text()))
     assert not psutil.pid_exists(int(pid_path.read_text()))
 
 
@@ -54,6 +63,7 @@ def test_bounded_output_timeout_reaps_the_child(tmp_path):
     ]
     with pytest.raises(subprocess.TimeoutExpired):
         processes.bounded_output(command, limit=512, timeout=0.5)
+    wait_for_pid_exit(int(pid_path.read_text()))
     assert not psutil.pid_exists(int(pid_path.read_text()))
 
 
@@ -82,6 +92,124 @@ def test_bounded_output_does_not_wait_for_an_inherited_stderr_pipe(tmp_path):
                 pass
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows launcher and nested job ownership")
+@pytest.mark.parametrize("overrun", [False, True])
+@pytest.mark.parametrize(
+    "launcher", [sys.executable, getattr(sys, "_base_executable", sys.executable)]
+)
+def test_bounded_output_terminates_launcher_and_its_descendants(tmp_path, overrun, launcher):
+    pid_path = tmp_path / "descendant.pid"
+    child = (
+        "import os,pathlib,sys,time; "
+        "pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(30)"
+    )
+    parent = (
+        "import pathlib,subprocess,sys,time; "
+        "subprocess.Popen([sys.executable,'-c',sys.argv[2],sys.argv[1]]); "
+        "deadline=time.monotonic()+2; "
+        "\nwhile not pathlib.Path(sys.argv[1]).exists() and time.monotonic()<deadline:time.sleep(0.005)"
+        "\nsys.stderr.buffer.write(b'x'*1024 if sys.argv[3]=='1' else b'');sys.stderr.flush();"
+        "time.sleep(30)"
+    )
+    expected = ValueError if overrun else subprocess.TimeoutExpired
+    with pytest.raises(expected):
+        processes.bounded_output(
+            [launcher, "-c", parent, str(pid_path), child, "1" if overrun else "0"],
+            limit=512,
+            timeout=0.5,
+        )
+    assert pid_path.exists(), "The nested child was never started"
+    pid = int(pid_path.read_text())
+    try:
+        psutil.Process(pid).wait(timeout=1)
+    except psutil.NoSuchProcess:
+        pass
+    wait_for_pid_exit(pid)
+    assert not psutil.pid_exists(pid)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows inherited writer ownership")
+def test_bounded_output_reaps_inherited_writer_after_parent_exits(tmp_path):
+    pid_path = tmp_path / "inherited-writer.pid"
+    child = (
+        "import os,pathlib,sys,time; "
+        "pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(30)"
+    )
+    parent = (
+        "import pathlib,subprocess,sys,time; "
+        "subprocess.Popen([sys.executable,'-c',sys.argv[2],sys.argv[1]]); "
+        "deadline=time.monotonic()+2; "
+        "\nwhile not pathlib.Path(sys.argv[1]).exists() and time.monotonic()<deadline:time.sleep(0.005)"
+        "\nsys.stderr.buffer.write(b'done');sys.stderr.flush()"
+    )
+    started = time.monotonic()
+    assert (
+        processes.bounded_output(
+            [getattr(sys, "_base_executable", sys.executable), "-c", parent, str(pid_path), child],
+            limit=512,
+            timeout=1,
+        )
+        == b"done"
+    )
+    assert time.monotonic() - started < 1.5
+    assert pid_path.exists()
+    pid = int(pid_path.read_text())
+    wait_for_pid_exit(pid)
+    assert not psutil.pid_exists(pid), "The inherited writer survived its owning operation"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows per-process ownership")
+def test_bounded_process_containment_refusal_executes_no_child(monkeypatch):
+    def refuse():
+        raise OSError("Test-only job assignment refusal")
+
+    def unexpected_spawn(*args, **kwargs):
+        pytest.fail("Uncontained child was spawned")
+
+    monkeypatch.setattr(processes, "_WindowsJob", refuse)
+    monkeypatch.setattr(processes.subprocess, "Popen", unexpected_spawn)
+    with pytest.raises(OSError, match="assignment refusal"):
+        processes.bounded_output(
+            [sys.executable, "-c", "raise SystemExit(0)"], limit=512, timeout=1
+        )
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows suspended process ownership")
+@pytest.mark.parametrize("stage", ["assign", "resume"])
+def test_bounded_process_containment_failure_cleans_suspended_child(tmp_path, monkeypatch, stage):
+    executed, children = tmp_path / "should-not-exist", []
+    spawn = subprocess.Popen
+
+    def track(*args, **kwargs):
+        child = spawn(*args, **kwargs)
+        children.append(child)
+        return child
+
+    def refuse(*args):
+        raise OSError("Test-only child containment refusal")
+
+    monkeypatch.setattr(processes.subprocess, "Popen", track)
+    if stage == "assign":
+        monkeypatch.setattr(processes._WindowsJob, "assign", refuse)
+    else:
+        monkeypatch.setattr(processes, "_resume_windows_process", refuse)
+    with pytest.raises(OSError, match="containment refusal"):
+        processes.bounded_output(
+            [
+                sys.executable,
+                "-c",
+                "import pathlib,sys;pathlib.Path(sys.argv[1]).write_text('ran')",
+                str(executed),
+            ],
+            limit=512,
+            timeout=1,
+        )
+    assert len(children) == 1 and children[0].returncode is not None
+    assert not executed.exists()
+    wait_for_pid_exit(children[0].pid)
+    assert not psutil.pid_exists(children[0].pid)
+
+
 def test_every_service_child_process_starts_without_a_console_window():
     launched, unguarded = set(), []
     for path in sorted(SOURCE.glob("*.py")):
@@ -96,11 +224,18 @@ def test_every_service_child_process_starts_without_a_console_window():
                 continue
             launched.add(path.name)
             flags = [keyword.value for keyword in node.keywords if keyword.arg == "creationflags"]
-            if not (flags and isinstance(flags[0], ast.Name) and flags[0].id == "NO_WINDOW"):
+            if not (
+                flags
+                and isinstance(flags[0], ast.Name)
+                and flags[0].id in {"NO_WINDOW", "NO_WINDOW_SUSPENDED"}
+            ):
                 unguarded.append(f"{path.name}:{node.lineno}")
     # A windowless service would open one console window per unguarded child.
     assert {"capture.py", "exports.py", "mediamtx.py", "provision.py", "recording.py"} <= launched
     assert unguarded == []
+    if sys.platform == "win32":
+        assert processes.NO_WINDOW_SUSPENDED & subprocess.CREATE_NO_WINDOW
+        assert processes.NO_WINDOW_SUSPENDED & processes.CREATE_SUSPENDED
 
 
 def test_managed_mediamtx_starts_without_a_console_window(tmp_path, monkeypatch):
@@ -185,6 +320,29 @@ def test_windows_children_do_not_outlive_an_abruptly_terminated_service():
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX service managers own cleanup")
 def test_child_containment_is_left_to_posix_service_managers():
     assert processes.contain_children() is False
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process group ownership")
+def test_owned_process_group_cleanup_preserves_an_unrelated_group():
+    command = [sys.executable, "-c", "import time; time.sleep(30)"]
+    unrelated = subprocess.Popen(command, start_new_session=True)
+    try:
+        with processes.owned_process(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        ) as child:
+            assert os.getpgid(child.pid) == child.pid
+            assert os.getpgid(child.pid) != os.getpgrp()
+            assert os.getpgid(child.pid) != os.getpgid(unrelated.pid)
+            child_pid = child.pid
+        assert child.returncode is not None
+        assert not psutil.pid_exists(child_pid)
+        assert unrelated.poll() is None, "Owned cleanup terminated an unrelated process group"
+    finally:
+        unrelated.kill()
+        unrelated.wait(timeout=5)
 
 
 def serve(tmp_path, monkeypatch, contain=lambda: True):

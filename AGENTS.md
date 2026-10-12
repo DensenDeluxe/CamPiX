@@ -15,7 +15,7 @@
 - Do not pass camera URLs, filenames, or user input to a shell. Do not add arbitrary macro, hook, or GStreamer execution paths without an explicit design and security review.
 - Persist media only after successful finalization; preserve interrupted files and transactional recovery. Schema migrations must protect existing data and reject unsupported downgrades.
 - Demo sources must remain explicit. Never present synthetic images, a discovered encoder name, an HTTP health check, or an available control as evidence of hardware qualification.
-- `auto` currently means software `libx264`, not certified hardware acceleration. Keep the implemented architecture, proposed research direction, and measured release evidence distinct.
+- `auto` prefers an allowlisted hardware encoder only after a successful profile-specific packet probe, with tested software `libx264` fallback. Encoder usability does not certify a physical camera or sustained performance. Keep implemented architecture, research direction, and measured evidence distinct.
 - Keep supplied artwork, English alternative text, original copyright notices, and dependency licenses. Do not manufacture compatibility or performance claims.
 
 ## Verification

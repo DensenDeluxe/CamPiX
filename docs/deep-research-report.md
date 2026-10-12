@@ -144,7 +144,7 @@ MJPEG is simple and robust but consumes comparatively high bandwidth. A universa
 
 ### Zero-copy and encoder capability detection
 
-Do not blindly launch `ffmpeg -c:v libx264` for every platform. A startup probe should examine V4L2 formats, M2M codecs, DMABUF, and libcamera streams. Pi 4 might then select native hardware H.264, while Pi 5 intentionally uses low-latency software encoding. This is a proposed improvement: current CamPiX `auto` still selects libx264 software encoding. [Implemented architecture](ARCHITECTURE.md).
+Do not blindly launch `ffmpeg -c:v libx264` for every platform. A startup probe should examine V4L2 formats, M2M codecs, DMABUF, and libcamera streams. Pi 4 might then select native hardware H.264, while Pi 5 intentionally uses low-latency software encoding. Current CamPiX implements bounded FFmpeg hardware-encoder/profile probes and automatic hardware preference with software fallback. Direct native CSI encoding, DMABUF and shared encoded streams remain proposed improvements. [Implemented architecture](ARCHITECTURE.md).
 
 ### Full multiple-camera support
 
@@ -529,7 +529,7 @@ A single “Supported: yes” column is too coarse. Separate board, OS, camera, 
 | Radxa           | Linux                  | CSI             | MIPI      | Board/vendor pipeline | Board dependent                               | Discovery and all capture workflows        | Experimental proposal               |
 | x86-64          | Debian/Ubuntu          | UVC             | USB       | V4L2                  | Future VAAPI/QSV optional                     | Live, recording, motion, multiple cameras  | Pending physical test               |
 
-Record the actual test date and exact versions only after a test has occurred. Native encoder availability on a board does not imply that current CamPiX uses it: its `auto` path is software encoding.
+Record the actual test date and exact versions only after a test has occurred. An encoder name does not establish usability: current CamPiX `auto` selects hardware only after a successful profile-specific packet probe, with software fallback. Such probes do not qualify a physical board/camera combination.
 
 Use strict status definitions:
 
