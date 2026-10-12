@@ -7,6 +7,7 @@ import threading
 import time
 
 from .capture import terminate_process
+from .processes import NO_WINDOW
 
 
 def encoder_probe(ffmpeg):
@@ -19,6 +20,7 @@ def encoder_probe(ffmpeg):
             text=True,
             timeout=10,
             check=True,
+            creationflags=NO_WINDOW,
         )
         encoders = [name for name in ("libx264", "h264_v4l2m2m") if name in result.stdout]
         return {"available": bool(encoders), "encoders": encoders, "hardware_verified": False}
@@ -76,7 +78,11 @@ class Recorder:
             str(self.partial),
         ]
         self.proc = subprocess.Popen(
-            command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=NO_WINDOW,
         )
         for frame in preroll:
             self.offer(frame)

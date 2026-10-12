@@ -99,7 +99,11 @@ def main():
 
         print(
             json.dumps(
-                {**discover_inventory(), "encoding": encoder_probe(settings.ffmpeg)}, indent=2
+                {
+                    **discover_inventory(ffmpeg=settings.ffmpeg),
+                    "encoding": encoder_probe(settings.ffmpeg),
+                },
+                indent=2,
             )
         )
         return
@@ -124,6 +128,19 @@ def main():
         logging.basicConfig(
             level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s"
         )
+        # The media-plane supervisor polls MediaMTX every two seconds; log only problems.
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+        from . import processes
+
+        try:
+            processes.contain_children()
+        except OSError as exc:
+            # Serving still works; only cleanup after an abnormal exit is weakened.
+            logging.getLogger("campix.service").warning(
+                "Child-process containment is unavailable (Windows error %s); "
+                "MediaMTX/FFmpeg can outlive an abnormal service exit",
+                getattr(exc, "winerror", None),
+            )
         import uvicorn
 
         from .app import create_app

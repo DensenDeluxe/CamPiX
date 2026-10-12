@@ -9,14 +9,16 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 from collections.abc import Callable
 from contextlib import closing
 from pathlib import Path
 
 from .config import Settings
 from .db import Database
-from .models import CameraConfig, UserCreate
+from .models import CameraConfig, UserCreate, directshow_source_valid
 from .process_lock import ProcessLock
+from .processes import NO_WINDOW
 from .security import HASHER
 
 # QUERYCAP reads driver metadata; it does not allocate buffers or start capture.
@@ -33,6 +35,8 @@ V4L2_CAP_STREAMING = 0x04000000
 V4L2_CAP_DEVICE_CAPS = 0x80000000
 INVENTORY_LIMIT = 64
 INVENTORY_BYTES = 65536
+DSHOW_DEVICE = re.compile(r'^\[[^\]]*\]\s+"(?P<name>[^"]+)"(?:\s+\((?P<kinds>[^)]*)\))?\s*$')
+DSHOW_ALTERNATIVE = re.compile(r'^\[[^\]]*\]\s+Alternative name "(?P<name>[^"]+)"\s*$')
 
 
 class ProvisionError(RuntimeError):
@@ -94,14 +98,142 @@ def _is_usb_picamera(item: dict) -> bool:
     )
 
 
-def local_inventory(sysfs: Path = Path("/sys/class/video4linux")) -> dict:
+def _directshow_listing(ffmpeg: str, timeout: float = 10) -> str:
+    """List DirectShow devices with bounded output; listing does not open a capture stream."""
+    output = bytearray()
+    with subprocess.Popen(
+        [ffmpeg, "-hide_banner", "-nostdin", "-list_devices", "true", "-f", "dshow", "-i", "dummy"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        creationflags=NO_WINDOW,
+    ) as process:
+
+        def collect():
+            while chunk := process.stderr.read(8192):
+                output.extend(chunk)
+                if len(output) > INVENTORY_BYTES:
+                    process.kill()
+                    return
+
+        reader = threading.Thread(target=collect, daemon=True)
+        reader.start()
+        try:
+            process.wait(timeout=timeout)
+        finally:
+            if process.poll() is None:
+                process.kill()
+            reader.join(timeout=5)
+    if len(output) > INVENTORY_BYTES:
+        raise ValueError("DirectShow device list exceeds its size limit")
+    # The list ends with an intentional "dummy" input error, so the exit status is ignored.
+    return output.decode("utf-8", "replace")
+
+
+def _directshow_video_devices(listing: str) -> list[tuple[str, str | None]]:
+    """Return (friendly name, alternative name) pairs for listed DirectShow video devices."""
+    devices, section, current = [], None, None
+    for line in listing.splitlines():
+        if "DirectShow video devices" in line or "DirectShow audio devices" in line:
+            # FFmpeg before 5.0 grouped devices under headings instead of type suffixes.
+            section = "video" if "video devices" in line else "audio"
+        elif alternative := DSHOW_ALTERNATIVE.match(line):
+            if current is not None:
+                current[1] = alternative["name"]
+            current = None
+        elif device := DSHOW_DEVICE.match(line):
+            kinds = device["kinds"]
+            types = {kind.strip() for kind in kinds.split(",")} if kinds is not None else {section}
+            current = [device["name"], None] if "video" in types else None
+            if current is not None:
+                devices.append(current)
+    return [(name, alternative) for name, alternative in devices]
+
+
+def _directshow_inventory(ffmpeg: str) -> dict:
+    result = {"devices": [], "diagnostics": [], "hardware_qualified": False}
+    try:
+        listing = _directshow_listing(ffmpeg)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        result["diagnostics"].append(
+            _diagnostic(
+                "directshow-listing-failed",
+                "FFmpeg could not list DirectShow devices; check the configured FFmpeg executable.",
+            )
+        )
+        return result
+    if "Unknown input format" in listing:
+        result["diagnostics"].append(
+            _diagnostic(
+                "directshow-unavailable",
+                "The configured FFmpeg build lacks DirectShow input; install a Windows build with dshow.",
+            )
+        )
+        return result
+    listed = _directshow_video_devices(listing)
+    if len(listed) > INVENTORY_LIMIT:
+        result["diagnostics"].append(
+            _diagnostic("inventory-limit", "Only the first 64 DirectShow devices were inspected.")
+        )
+    names = [name for name, _ in listed]
+    for name, alternative in listed[:INVENTORY_LIMIT]:
+        # Software filters, such as virtual cameras, are not physical capture devices.
+        if not alternative or not alternative.lower().startswith("@device_pnp_"):
+            result["diagnostics"].append(
+                _diagnostic(
+                    "directshow-software-source-not-registered",
+                    "Software DirectShow sources are not registered automatically; add one manually if intended.",
+                    name,
+                )
+            )
+            continue
+        forms = [form for form in (name, alternative) if directshow_source_valid(form)]
+        # A unique friendly name survives moving a USB camera to another port; identical
+        # models need the port-specific alternative name.
+        if name in forms and names.count(name) == 1:
+            source = name
+        elif alternative in forms:
+            source = alternative
+        else:
+            result["diagnostics"].append(
+                _diagnostic(
+                    "directshow-name-unsupported",
+                    "DirectShow device names contain characters that cannot be passed to FFmpeg safely.",
+                    name,
+                )
+            )
+            continue
+        result["devices"].append(
+            {
+                "backend": "dshow",
+                "source": source,
+                "aliases": forms,
+                "model": name[:80],
+                "identity": "dshow:" + alternative.lower(),
+                "status": "detected-not-opened",
+                "hardware_qualified": False,
+            }
+        )
+    if not listed:
+        result["diagnostics"].append(
+            _diagnostic(
+                "no-directshow-video-device",
+                "FFmpeg listed no DirectShow video device; check that the camera is enabled in Windows.",
+            )
+        )
+    return result
+
+
+def local_inventory(sysfs: Path = Path("/sys/class/video4linux"), ffmpeg: str = "ffmpeg") -> dict:
     """Inventory physical sources without opening a capture stream or qualifying hardware."""
+    if sys.platform == "win32":
+        return _directshow_inventory(ffmpeg)
     result = {"devices": [], "diagnostics": [], "hardware_qualified": False}
     if sys.platform != "linux":
         result["diagnostics"].append(
             _diagnostic(
                 "local-discovery-unavailable",
-                "Automatic local camera discovery requires Linux; configure network cameras in the UI.",
+                "Automatic local camera discovery requires Linux or Windows; configure network cameras in the UI.",
             )
         )
         return result
@@ -223,8 +355,8 @@ def local_inventory(sysfs: Path = Path("/sys/class/video4linux")) -> dict:
     return result
 
 
-def discover_inventory(timeout: float = 15) -> dict:
-    """Bound native import/ioctl work in a child, including its output and shutdown."""
+def discover_inventory(timeout: float = 15, ffmpeg: str = "ffmpeg") -> dict:
+    """Bound native import/ioctl/device-list work in a child, including output and shutdown."""
     failure = {"devices": [], "diagnostics": [], "hardware_qualified": False}
     with tempfile.TemporaryDirectory(prefix="campix-discovery-") as directory:
         output = Path(directory) / "inventory.json"
@@ -239,12 +371,14 @@ def discover_inventory(timeout: float = 15) -> dict:
                     json.dumps(sys.path),
                     "--inventory-worker",
                     str(output),
+                    ffmpeg,
                 ],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 timeout=timeout,
                 check=True,
+                creationflags=NO_WINDOW,
             )
             if output.stat().st_size > INVENTORY_BYTES:
                 raise ValueError("Inventory exceeds its size limit")
@@ -324,7 +458,7 @@ def setup(
                 "Invalid username/password; use safe username characters and a password of 12–128 characters"
             ) from exc
         password_hash = HASHER.hash(account.password)
-    inventory = discover_inventory()
+    inventory = discover_inventory(ffmpeg=settings.ffmpeg)
     settings.data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     lock = ProcessLock(settings.data_dir)
     try:
@@ -383,7 +517,7 @@ def setup(
                     fps=10,
                     encoder="auto",
                 )
-                if camera.backend not in {"picamera2", "v4l2"}:
+                if camera.backend not in {"picamera2", "v4l2", "dshow"}:
                     raise ProvisionError("Discovery reported an unsupported local camera backend")
                 conn.execute(
                     "INSERT INTO cameras(id,config) VALUES (?,?)",
@@ -406,9 +540,9 @@ def setup(
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3 or sys.argv[1] != "--inventory-worker":
+    if len(sys.argv) != 4 or sys.argv[1] != "--inventory-worker":
         raise SystemExit("This module is an internal discovery worker; use campixd setup")
-    encoded = json.dumps(local_inventory()).encode("utf-8")
+    encoded = json.dumps(local_inventory(ffmpeg=sys.argv[3])).encode("utf-8")
     if len(encoded) > INVENTORY_BYTES:
         raise SystemExit("Inventory exceeds its size limit")
     Path(sys.argv[2]).write_bytes(encoded)

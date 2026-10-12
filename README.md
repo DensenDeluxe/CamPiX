@@ -22,7 +22,7 @@ The familiar camera-appliance workflow should not depend on an obsolete camera s
 
 ## Features
 
-- **Capture adapters:** Picamera2/libcamera, Linux V4L2, RTSP/HTTP network sources, and an existing local legacy JPEG preview. Independent capture workers reconnect after failures.
+- **Capture adapters:** Picamera2/libcamera, Linux V4L2, Windows DirectShow webcams through FFmpeg, RTSP/HTTP network sources, and an existing local legacy JPEG preview. Independent capture workers reconnect after failures.
 - **Photos and recordings:** real JPEG snapshots and H.264/MP4 files, timed recordings, bounded pre-roll, and motion-triggered recording with renewable post-roll.
 - **Media library:** playback, authenticated downloads, locking, deletion, retention rules, storage-reserve protection, and queued timelapse exports.
 - **Camera management:** multiple profiles and controls discovered from the selected adapter, rather than invented hardware support.
@@ -53,7 +53,7 @@ curl -fsSL https://raw.githubusercontent.com/DensenDeluxe/CamPiX/main/install.sh
 
 Run the installer as your normal user, in an interactive terminal. It requests elevation for system-package operations. The entrypoint resolves the requested Git reference once and installs from a fresh detached checkout. `CAMPIX_REF` selects an explicit tag or commit for an application release; the default follows `main`.
 
-After successful setup and service startup, open <http://127.0.0.1:8080>. Raspberry Pi and Debian-family systems use a native package and systemd. Other supported profiles use a private installation and start at user login through a systemd user service, macOS LaunchAgent, or limited Windows scheduled task. Windows and macOS support network sources; local Picamera2 and V4L2 capture require Linux.
+After successful setup and service startup, open <http://127.0.0.1:8080>. Raspberry Pi and Debian-family systems use a native package and systemd. Other supported profiles use a private installation and start at user login through a systemd user service, macOS LaunchAgent, or limited Windows scheduled task. Windows detects USB and integrated webcams through FFmpeg's DirectShow input; macOS supports network sources. Local Picamera2 and V4L2 capture require Linux.
 
 For download-and-inspect commands, supported profiles, offline planning, backups, and recovery, see [installation and operations](docs/DEPLOYMENT.md). The installer can discover a board and devices, but physical-camera compatibility and performance still require validation on that host.
 
@@ -75,6 +75,7 @@ Always open the interface through `campixd`. Opening `dist/index.html` directly 
 | ---------------------------------------------------------------------- | --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
 | Raspberry Pi CSI; libcamera-compatible official or third-party modules | Picamera2/libcamera                                                   | Host drivers, sensor tuning, controls, and performance must be tested on the actual combination. |
 | USB/UVC or a standard Linux capture device                             | V4L2/OpenCV with `v4l2-ctl` controls                                  | Available formats and controls depend on the device and driver.                                  |
+| USB or integrated webcam on Windows                                    | FFmpeg DirectShow input at a native profile size                      | Modes depend on the device and driver; no image controls; one integrated webcam measured.        |
 | IP camera or network stream                                            | FFmpeg RTSP/HTTP(S) decoder                                           | Reconnection is implemented; individual camera models still require qualification.               |
 | Existing legacy installation                                           | Local JPEG preview and a restricted authenticated HTTP command facade | Not a complete MMAL/FIFO daemon or migration/import tool.                                        |
 | Synthetic input                                                        | Explicit `--demo` adapter                                             | Software test input, never evidence of physical camera compatibility.                            |

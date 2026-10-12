@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from .capture import CaptureError, terminate_process
+from .processes import NO_WINDOW
 
 MEDIAMTX_VERSION = "1.21.2"
 
@@ -112,6 +113,7 @@ class Publisher:
                     stdin=subprocess.PIPE,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
+                    creationflags=NO_WINDOW,
                 )
                 sequence = -1
                 while not self.halt.is_set():
@@ -175,6 +177,7 @@ class MediaPlane:
             text=True,
             timeout=5,
             check=True,
+            creationflags=NO_WINDOW,
         )
         if result.stdout.strip() != "v" + MEDIAMTX_VERSION:
             raise RuntimeError(f"Managed MediaMTX requires v{MEDIAMTX_VERSION}")
@@ -184,6 +187,7 @@ class MediaPlane:
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            creationflags=NO_WINDOW,
         )
         if self.halt.wait(0.3) or self.proc.poll() is not None:
             raise RuntimeError("Managed MediaMTX did not start; check its ports and configuration")

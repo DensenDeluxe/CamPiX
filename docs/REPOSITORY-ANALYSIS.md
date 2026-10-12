@@ -107,7 +107,7 @@ These were migration recommendations, not a claim that every compatibility path 
 
 Version 0.2.0 has moved beyond the earlier static dashboard milestone. It provides an executable Python/FastAPI `campixd` service and an authenticated, buildless JavaScript interface using the supplied CamPiX graphics:
 
-- Picamera2, V4L2, network-source, and local legacy-JPEG adapters with independent capture workers;
+- Picamera2, V4L2, Windows DirectShow, network-source, and local legacy-JPEG adapters with independent capture workers;
 - real JPEG capture, FFmpeg H.264/MP4 recording, bounded pre-roll, motion post-roll, and queued timelapse exports;
 - persistent camera profiles, schedules, media, users, events, and sessions in SQLite;
 - server-enforced roles, Argon2id passwords, CSRF protection, and revocable sessions;

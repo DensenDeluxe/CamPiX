@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import re
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+
+def directshow_source_valid(source: str) -> bool:
+    """FFmpeg splits DirectShow input on ":"; a name must not add audio or other devices."""
+    return bool(re.fullmatch(r'[^\x00-\x1f\x7f":]{1,256}', source)) and source == source.strip()
 
 
 class StrictModel(BaseModel):
@@ -13,7 +19,7 @@ class StrictModel(BaseModel):
 class CameraConfig(StrictModel):
     id: str = Field(pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}$")
     name: str = Field(min_length=1, max_length=80)
-    backend: Literal["synthetic", "picamera2", "v4l2", "network", "gstreamer", "legacy"]
+    backend: Literal["synthetic", "picamera2", "v4l2", "dshow", "network", "gstreamer", "legacy"]
     source: str = Field("0", max_length=2048)
     width: int = Field(1280, ge=160, le=4096, multiple_of=2)
     height: int = Field(720, ge=120, le=2160, multiple_of=2)
@@ -35,6 +41,10 @@ class CameraConfig(StrictModel):
             raise ValueError("Picamera2 source must be a camera index")
         if self.backend == "v4l2" and not __import__("re").fullmatch(r"/dev/video\d+", self.source):
             raise ValueError("V4L2 source must be /dev/videoN")
+        if self.backend == "dshow" and not directshow_source_valid(self.source):
+            raise ValueError(
+                "DirectShow source must be a device name without quotes, colons, or control characters"
+            )
         if self.backend == "network":
             url = urlsplit(self.source)
             if url.scheme not in {"rtsp", "rtsps", "http", "https"} or not url.hostname:

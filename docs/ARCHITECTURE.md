@@ -14,6 +14,7 @@ campixd (one process per data directory)
    ├── Per camera: capture thread → JPEG / bounded pre-roll / small analysis frames
    │    ├── Picamera2: distribution libcamera and dynamic sensor controls
    │    ├── V4L2: OpenCV capture and v4l2-ctl controls
+   │    ├── DirectShow: isolated FFmpeg device input on Windows
    │    ├── Network: isolated FFmpeg decoder, RTSP/HTTP(S)
    │    └── Legacy: existing local JPEG preview (not an MMAL/FIFO driver)
    ├── Per camera: motion worker → event → recording / renewed post-roll

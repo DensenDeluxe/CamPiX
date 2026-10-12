@@ -12,6 +12,7 @@ from PIL import Image, ImageOps
 
 from .capture import terminate_process
 from .media import StorageError
+from .processes import NO_WINDOW
 
 
 class ExportService:
@@ -105,6 +106,7 @@ class ExportService:
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                creationflags=NO_WINDOW,
             )
             deadline = time.monotonic() + 120
             try:

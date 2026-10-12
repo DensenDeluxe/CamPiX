@@ -67,6 +67,25 @@ test("real capture, recording, library, schedule and persistent profile", async 
   expect(errors).toEqual([]);
 });
 
+test("DirectShow webcams are offered and unsafe device names are rejected", async ({
+  page,
+}) => {
+  await signin(page);
+  await page.locator("[data-view-panel=overview] [data-add-camera]").click();
+  await expect(page.locator("#camera-dialog")).toBeVisible();
+  await page.locator("#new-camera-backend").selectOption("dshow");
+  await expect(page.locator("#new-camera-source")).toHaveValue("");
+  await page.locator("#camera-form [name=name]").fill("Webcam");
+  // ":" would let a device name add an audio device to FFmpeg's DirectShow input.
+  await page.locator("#new-camera-source").fill("Webcam:audio=Microphone");
+  await page.locator("#camera-form .full-button").click();
+  await expect(page.locator("#toast")).toHaveClass(/error-toast/);
+  await expect(page.locator("#toast-message")).toContainText(
+    "DirectShow source",
+  );
+  await expect(page.locator("#camera-count")).toHaveText("1 / 1");
+});
+
 test("viewer cannot capture or administer; logout revokes the session", async ({
   page,
 }) => {

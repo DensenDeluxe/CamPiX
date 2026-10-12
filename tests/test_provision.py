@@ -180,7 +180,7 @@ def test_discovery_timeout_returns_diagnostic_and_removes_private_staging(monkey
     output_paths = []
 
     def run(command, **kwargs):
-        output_paths.append(command[-1])
+        output_paths.append(command[command.index("--inventory-worker") + 1])
         assert kwargs["stdin"] == subprocess.DEVNULL
         assert kwargs["stdout"] == subprocess.DEVNULL
         assert kwargs["stderr"] == subprocess.DEVNULL
@@ -195,7 +195,8 @@ def test_discovery_timeout_returns_diagnostic_and_removes_private_staging(monkey
 
 def test_discovery_rejects_unbounded_worker_result(monkeypatch):
     def run(command, **kwargs):
-        Path(command[-1]).write_bytes(b" " * (provision.INVENTORY_BYTES + 1))
+        output = command[command.index("--inventory-worker") + 1]
+        Path(output).write_bytes(b" " * (provision.INVENTORY_BYTES + 1))
 
     monkeypatch.setattr(provision.subprocess, "run", run)
     result = provision.discover_inventory()
@@ -224,7 +225,9 @@ def test_discovery_worker_preserves_native_wrapper_import_paths(tmp_path, monkey
 def test_noninteractive_without_admin_makes_no_state_changes(tmp_path, monkeypatch):
     settings = Settings(data_dir=tmp_path / "untouched")
     monkeypatch.setattr(
-        provision, "discover_inventory", lambda: pytest.fail("No discovery before admin readiness")
+        provision,
+        "discover_inventory",
+        lambda **_: pytest.fail("No discovery before admin readiness"),
     )
     with pytest.raises(provision.ProvisionError, match="No enabled administrator"):
         provision.setup(settings, non_interactive=True)
@@ -234,7 +237,9 @@ def test_noninteractive_without_admin_makes_no_state_changes(tmp_path, monkeypat
 def test_invalid_password_makes_no_state_changes(tmp_path, monkeypatch):
     settings = Settings(data_dir=tmp_path / "untouched")
     monkeypatch.setattr(
-        provision, "discover_inventory", lambda: pytest.fail("No discovery before admin readiness")
+        provision,
+        "discover_inventory",
+        lambda **_: pytest.fail("No discovery before admin readiness"),
     )
     with pytest.raises(provision.ProvisionError, match="Invalid username/password"):
         provision.setup(settings, password_reader=lambda: "short")
@@ -244,7 +249,7 @@ def test_invalid_password_makes_no_state_changes(tmp_path, monkeypatch):
 def test_setup_creates_secure_admin_and_multiple_conservative_cameras(tmp_path, monkeypatch):
     settings = Settings(data_dir=tmp_path / "data")
     devices = inventory(device(), device("1", "csi:i2c-camera", "picamera2", "imx708"))
-    monkeypatch.setattr(provision, "discover_inventory", lambda: devices)
+    monkeypatch.setattr(provision, "discover_inventory", lambda **_: devices)
     result = provision.setup(settings, password_reader=lambda: "test-only-setup-password")
     assert result["admin_created"] is True
     assert result["hardware_qualified"] is False
@@ -291,7 +296,7 @@ def test_setup_preserves_existing_accounts_profiles_settings_media_and_is_idempo
     monkeypatch.setattr(
         provision,
         "discover_inventory",
-        lambda: inventory(device(), device("/dev/video3", "usb:second")),
+        lambda **_: inventory(device(), device("/dev/video3", "usb:second")),
     )
     result = provision.setup(
         settings,
@@ -319,7 +324,7 @@ def test_setup_camera_limit_preserves_existing_and_never_adds_synthetic(tmp_path
     )
     db.execute("INSERT INTO cameras VALUES (?,?)", (camera.id, camera.model_dump_json()))
     before = snapshot_database(db)
-    monkeypatch.setattr(provision, "discover_inventory", lambda: inventory(device()))
+    monkeypatch.setattr(provision, "discover_inventory", lambda **_: inventory(device()))
     result = provision.setup(settings, non_interactive=True)
     assert result["cameras_added"] == []
     assert result["cameras_skipped"][0]["reason"] == "camera-limit"
@@ -337,7 +342,7 @@ def test_setup_preserves_existing_secondary_usb_node_without_duplicate_owner(tmp
     before = snapshot_database(db)
     detected = device()
     detected["aliases"] = ["/dev/video0", "/dev/video2"]
-    monkeypatch.setattr(provision, "discover_inventory", lambda: inventory(detected))
+    monkeypatch.setattr(provision, "discover_inventory", lambda **_: inventory(detected))
     result = provision.setup(settings, non_interactive=True)
     assert result["cameras_added"] == []
     assert result["cameras_skipped"][0]["reason"] == "already-configured"
@@ -348,7 +353,7 @@ def test_setup_preserves_existing_secondary_usb_node_without_duplicate_owner(tmp
 def test_empty_inventory_never_invents_a_demo_camera(tmp_path, monkeypatch):
     settings = Settings(data_dir=tmp_path / "data", demo=True)
     db = with_admin(settings)
-    monkeypatch.setattr(provision, "discover_inventory", lambda: inventory())
+    monkeypatch.setattr(provision, "discover_inventory", lambda **_: inventory())
     result = provision.setup(settings, non_interactive=True)
     assert result["cameras_added"] == [] and result["devices"] == []
     assert db.all("SELECT * FROM cameras") == []
@@ -361,7 +366,7 @@ def test_setup_excludes_running_service_without_database_mutation(tmp_path, monk
     before = snapshot_database(db)
     lock = ProcessLock(settings.data_dir)
     lock.acquire()
-    monkeypatch.setattr(provision, "discover_inventory", lambda: inventory(device()))
+    monkeypatch.setattr(provision, "discover_inventory", lambda **_: inventory(device()))
     try:
         with pytest.raises(provision.ProvisionError, match="Stop the CamPiX service"):
             provision.setup(settings, non_interactive=True)
@@ -376,7 +381,7 @@ def test_setup_rolls_back_admin_and_camera_inserts_on_invalid_inventory(tmp_path
     monkeypatch.setattr(
         provision,
         "discover_inventory",
-        lambda: inventory(device(), device("0", "fake:synthetic", "synthetic")),
+        lambda **_: inventory(device(), device("0", "fake:synthetic", "synthetic")),
     )
     with pytest.raises(provision.ProvisionError, match="unsupported local camera"):
         provision.setup(settings, password_reader=lambda: "test-only-setup-password")
@@ -407,7 +412,7 @@ def test_setup_refuses_future_schema_before_discovery(tmp_path, monkeypatch):
     with sqlite3.connect(path) as conn:
         conn.execute("PRAGMA user_version=99")
     monkeypatch.setattr(
-        provision, "discover_inventory", lambda: pytest.fail("Must reject before discovery")
+        provision, "discover_inventory", lambda **_: pytest.fail("Must reject before discovery")
     )
     with pytest.raises(provision.ProvisionError, match="downgrade refused"):
         provision.setup(Settings(data_dir=tmp_path), non_interactive=True)
@@ -421,7 +426,7 @@ def test_setup_cli_json_uses_config_and_preserves_existing_admin(tmp_path, monke
     db.close()
     config = tmp_path / "settings.json"
     config.write_text(settings.model_dump_json())
-    monkeypatch.setattr(provision, "discover_inventory", lambda: inventory(device()))
+    monkeypatch.setattr(provision, "discover_inventory", lambda **_: inventory(device()))
     monkeypatch.setattr(
         sys, "argv", ["campixd", "--config", str(config), "setup", "--non-interactive", "--json"]
     )

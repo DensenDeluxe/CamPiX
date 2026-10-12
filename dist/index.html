@@ -602,6 +602,7 @@
             >Backend<select name="backend" id="new-camera-backend">
               <option value="picamera2">Picamera2 / libcamera</option>
               <option value="v4l2">V4L2 / USB</option>
+              <option value="dshow">DirectShow / Windows USB</option>
               <option value="network">RTSP / HTTP</option>
               <option value="legacy">Legacy JPEG preview</option>
               <option value="synthetic" id="synthetic-option">
@@ -609,7 +610,8 @@
               </option>
             </select></label
           ><label
-            ><span data-i18n="source">Quelle (Index, /dev/videoN oder URL)</span
+            ><span data-i18n="source"
+              >Quelle (Index, /dev/videoN, Gerätename oder URL)</span
             ><input
               name="source"
               id="new-camera-source"

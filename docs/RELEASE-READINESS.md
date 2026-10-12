@@ -11,6 +11,7 @@ Evidence snapshot: 11 October 2026. **Integrated software release candidate; no 
 | Standalone `campixd`, REST/OpenAPI, WebSocket, SQLite         | Implemented; API, authentication, and restart tests.                                                                                                                                  |
 | Roles, Argon2, CSRF, session expiry, rate limits              | Implemented; negative tests cover permissions, origins, and path boundaries.                                                                                                          |
 | Picamera2 and V4L2                                            | Adapters implemented; no physical CSI/UVC combination locally certified.                                                                                                              |
+| Windows DirectShow webcams                                    | FFmpeg adapter and discovery implemented; one integrated USB webcam measured on one Windows 11 host, without disconnect or soak tests.                                                |
 | RTSP/HTTP network sources                                     | Decoder and reconnection implemented; individual IP camera models still need qualification.                                                                                           |
 | Multiple cameras and dynamic controls                         | Implemented; physical pipeline and bandwidth limits not measured.                                                                                                                     |
 | JPEG, H.264/MP4, pre-/post-roll, timelapse                    | Real files and FFmpeg encoding; no native zero-copy pipeline.                                                                                                                         |
@@ -50,6 +51,44 @@ A target-native amd64 `.deb` was built in WSL and its extracted-package smoke ch
 Lock consistency, JavaScript syntax, local documentation links, and formatting checks passed. Python lint passed with Ruff 0.17.0. The dependency locks were not regenerated for this installer change; these checks are not a new vulnerability audit.
 
 These are build, installed-package, and software integration results, rather than an installed systemd service or Raspberry Pi qualification. The new entrypoints are local repository changes; no publication, target-host installer rollout, or physical-camera qualification is recorded here.
+
+## Windows service and webcam verification — 12 October 2026
+
+The host was Windows 11 Home 10.0.26300 on a 24-thread Intel CPU, with Windows Terminal as the default terminal and FFmpeg 8.1.1 from WinGet. It ran a portable installation of revision `c396dd0`, which showed two problems.
+
+- **Console window.** An empty console window was titled with the managed `mediamtx.exe` path. Each time the window was closed, MediaMTX terminated and a `media_plane.restart` event followed. The windowless `pythonw.exe` service had started its console children without suppressing their windows.
+- **Orphaned children.** A controlled check showed that a child process outlived an abruptly terminated Python parent, both through the virtual environment's launcher and through the base interpreter. A hidden MediaMTX could therefore keep the managed ports after a crash and block the next start.
+
+That revision also ignored the built-in webcam, because local discovery and capture existed only for Linux. A manually added V4L2 profile could only fail on Windows.
+
+The service now starts children without console windows and puts them in a kill-on-close job with the service. The `httpx` logger writes only warnings, instead of one MediaMTX poll line about every two seconds. Windows discovery reads FFmpeg's DirectShow list, and a DirectShow adapter captures through FFmpeg.
+
+The Windows/Python 3.11.9 suite recorded **123 passes and 2 explicit skips**:
+
+- The managed MediaMTX integration case was not run, because the host's own CamPiX installation occupied its fixed ports.
+- The other skip is the POSIX-only containment case.
+
+Against the previous sources, 32 of the new tests failed. The two that passed exercise Windows behavior of the new process module itself. An isolated windowless `pythonw.exe` service using the explicit synthetic source started FFmpeg for the encoder probe and for a recording. A 100 ms scan found no new console window. After the service interpreter was terminated abruptly, no FFmpeg process remained.
+
+The physical camera was an integrated ACER FHD User Facing webcam (USB 04F2:B831). DirectShow offered NV12 and YUY2 at 640×360, 640×480, 1280×720, and 1920×1080, all at a fixed 30 fps; the default mode was raw 1920×1080. Discovery listed exactly this camera without opening it; the IR sensor used for face sign-in is not exposed through DirectShow. Capture results:
+
+| Profile  | Mode                                      | Frame rate                            | FFmpeg CPU (share of host) |
+| -------- | ----------------------------------------- | ------------------------------------- | -------------------------- |
+| 640×480  | Native                                    | 10.2 fps                              | 0.1 %                      |
+| 1280×720 | Native                                    | 10.3 fps                              | 0.4 %                      |
+| 800×600  | Fallback: padded default mode, not native | 7.4 fps, window included stream start | 1.1 %                      |
+
+In a deployment-shaped check, `setup` registered the camera as a 640×480 `dshow` profile. The windowless service brought it online at 9.3 fps against a 10 fps target. It produced a 640×480 snapshot and a 5-second H.264 640×480 recording, verified with `ffprobe`. No console window appeared. After an abrupt service termination, both FFmpeg processes ended: capture and recording. The test media was deleted afterwards.
+
+The Chromium suite recorded **5 passes**, including DirectShow device-name validation through the dialog. Its optional MediaMTX case was skipped for the same port reason. Lock consistency, JavaScript syntax, local documentation links, and formatting checks passed. Ruff 0.17.0 reported no findings.
+
+These results cover one webcam on one host. They are not recorded here:
+
+- Disconnect and reconnect, soak, and privacy-denied behavior
+- Other webcams and virtual cameras
+- MediaMTX publishing of the webcam
+- Linux/macOS runs of the new tests
+- A replacement of the installed `c396dd0` deployment
 
 ## Remaining production gates
 

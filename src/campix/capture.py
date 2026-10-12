@@ -11,6 +11,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageEnhance
 
 from .models import CameraConfig, ControlPatch
+from .processes import NO_WINDOW
 
 
 class CaptureError(RuntimeError):
@@ -183,6 +184,7 @@ class V4L2Backend(Backend):
                     text=True,
                     timeout=5,
                     check=True,
+                    creationflags=NO_WINDOW,
                 )
                 import re
 
@@ -245,6 +247,7 @@ class V4L2Backend(Backend):
                 capture_output=True,
                 timeout=5,
                 check=True,
+                creationflags=NO_WINDOW,
             )
         except (OSError, subprocess.SubprocessError) as exc:
             raise CaptureError("Camera driver rejected these controls") from exc
@@ -256,6 +259,22 @@ class V4L2Backend(Backend):
 
 
 class NetworkBackend(Backend):
+    model = "Network camera"
+
+    def input_arguments(self):
+        arguments = [
+            "-protocol_whitelist",
+            "tcp,udp,rtp,rtsp,http,https,tls,crypto",
+            "-rw_timeout",
+            "10000000",
+        ]
+        if self.config.source.startswith(("rtsp://", "rtsps://")):
+            arguments += ["-rtsp_transport", "tcp"]
+        return arguments + ["-i", self.config.source]
+
+    def video_filter(self):
+        return f"scale={self.config.width}:{self.config.height},fps={self.config.fps}"
+
     def open(self):
         command = [
             self.ffmpeg,
@@ -263,19 +282,10 @@ class NetworkBackend(Backend):
             "-hide_banner",
             "-loglevel",
             "error",
-            "-protocol_whitelist",
-            "tcp,udp,rtp,rtsp,http,https,tls,crypto",
-            "-rw_timeout",
-            "10000000",
-        ]
-        if self.config.source.startswith(("rtsp://", "rtsps://")):
-            command += ["-rtsp_transport", "tcp"]
-        command += [
-            "-i",
-            self.config.source,
+            *self.input_arguments(),
             "-an",
             "-vf",
-            f"scale={self.config.width}:{self.config.height},fps={self.config.fps}",
+            self.video_filter(),
             "-f",
             "image2pipe",
             "-c:v",
@@ -283,10 +293,14 @@ class NetworkBackend(Backend):
             "pipe:1",
         ]
         self.proc = subprocess.Popen(
-            command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            creationflags=NO_WINDOW,
         )
         self.buffer = bytearray()
-        self.capabilities.update(model="Network camera", controls=[], audio=False)
+        self.capabilities.update(model=self.model, controls=[], audio=False)
 
     def read(self):
         while True:
@@ -298,16 +312,57 @@ class NetworkBackend(Backend):
                     return image.convert("RGB")
             chunk = self.proc.stdout.read(4096)
             if not chunk:
-                raise CaptureError("Network camera is unavailable")
+                raise CaptureError(f"{self.model} is unavailable")
             self.buffer.extend(chunk)
             if len(self.buffer) > 16 * 1024 * 1024:
-                raise CaptureError("Network frame exceeds the supported size")
+                raise CaptureError(f"{self.model} frame exceeds the supported size")
 
     def close(self):
         if hasattr(self, "proc"):
             terminate_process(self.proc)
             if self.proc.stdout:
                 self.proc.stdout.close()
+
+
+class DirectShowBackend(NetworkBackend):
+    """Windows USB or integrated camera captured through FFmpeg's DirectShow input."""
+
+    model = "DirectShow camera"
+    native_size = True
+    pending = None
+
+    def input_arguments(self):
+        # Webcams often default to raw full HD at a fixed 30 fps. Request the profile size
+        # natively; a requested frame rate outside the device's list would fail to open.
+        mode = ["-video_size", f"{self.config.width}x{self.config.height}"]
+        # One argument and no shell; validation rejects ":" so no audio device can be added.
+        source = ["-i", "video=" + self.config.source]
+        return ["-f", "dshow", "-rtbufsize", "32M", *(mode if self.native_size else []), *source]
+
+    def video_filter(self):
+        # A fallback mode can differ in aspect ratio: pad rather than distort the image.
+        width, height = self.config.width, self.config.height
+        return (
+            f"scale={width}:{height}:force_original_aspect_ratio=decrease:force_divisible_by=2,"
+            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,fps={self.config.fps}"
+        )
+
+    def open(self):
+        self.native_size, self.pending = True, None
+        super().open()
+        try:
+            self.pending = super().read()
+        except CaptureError:
+            # No native mode of this size (or the device is busy): use its default mode.
+            self.close()
+            self.native_size = False
+            super().open()
+
+    def read(self):
+        if self.pending is not None:
+            image, self.pending = self.pending, None
+            return image
+        return super().read()
 
 
 class LegacyBackend(Backend):
@@ -339,6 +394,7 @@ def make_backend(config, ffmpeg):
         "synthetic": SyntheticBackend,
         "picamera2": PicameraBackend,
         "v4l2": V4L2Backend,
+        "dshow": DirectShowBackend,
         "network": NetworkBackend,
         "legacy": LegacyBackend,
     }.get(config.backend)
@@ -347,7 +403,7 @@ def make_backend(config, ffmpeg):
     return cls(config, ffmpeg)
 
 
-def discover():
+def discover(ffmpeg="ffmpeg"):
     from .provision import discover_inventory
 
-    return discover_inventory()["devices"]
+    return discover_inventory(ffmpeg=ffmpeg)["devices"]

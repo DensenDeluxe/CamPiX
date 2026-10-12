@@ -109,8 +109,8 @@
     users: ["Benutzer", "Users"],
     newUser: ["＋ Benutzer", "＋ User"],
     source: [
-      "Quelle (Index, /dev/videoN oder URL)",
-      "Source (index, /dev/videoN or URL)",
+      "Quelle (Index, /dev/videoN, Gerätename oder URL)",
+      "Source (index, /dev/videoN, device name or URL)",
     ],
     cameraHint: [
       "Treiber müssen auf dem Host installiert sein. Ein Gerät ist erst nach erfolgreichem Öffnen online.",
@@ -1002,6 +1002,7 @@
     $("#new-camera-source").value = {
       picamera2: "0",
       v4l2: "/dev/video0",
+      dshow: "",
       network: "rtsp://",
       legacy: "/dev/shm/mjpeg/cam.jpg",
       synthetic: "0",

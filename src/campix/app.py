@@ -301,7 +301,7 @@ def create_app(settings: Settings | None = None):
 
     @app.get("/api/v1/discovery", dependencies=[Depends(admin)])
     def discovery():
-        return {"devices": discover(), "encoders": cameras.encoders}
+        return {"devices": discover(settings.ffmpeg), "encoders": cameras.encoders}
 
     @app.post("/api/v1/cameras", dependencies=[Depends(admin)], status_code=201)
     def save_camera(payload: CameraConfig):
