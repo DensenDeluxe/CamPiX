@@ -2470,8 +2470,41 @@ a {
   top: 15px;
   left: 15px;
 }
-.live-stage:fullscreen {
+.fullscreen-control {
+  flex-shrink: 0;
+  min-height: 44px;
+}
+.fullscreen-exit {
+  position: absolute;
+  top: max(15px, env(safe-area-inset-top));
+  right: max(15px, env(safe-area-inset-right));
+  color: #fff;
+  background: rgba(6, 19, 35, 0.9);
+  border-color: rgba(255, 255, 255, 0.4);
+}
+.live-stage:fullscreen,
+.live-expanded .live-stage {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  border: 0;
+  background: #000;
+}
+.live-expanded {
+  overflow: hidden;
+}
+.live-expanded .view {
+  animation: none;
+}
+.live-expanded .toast {
+  z-index: 110;
+}
+.live-expanded .live-stage {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
   height: 100vh;
+  height: 100dvh;
 }
 .empty-message {
   color: var(--muted);

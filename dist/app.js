@@ -27,6 +27,8 @@
     cameraDirty: false,
     storageDirty: false,
     refreshGeneration: 0,
+    liveFullscreen: false,
+    fullscreenGeneration: 0,
   };
   const words = {
     signin: ["Anmelden", "Sign in"],
@@ -61,6 +63,12 @@
     ],
     jpegLive: ["JPEG · Live", "JPEG · Live"],
     autoLive: ["WebRTC → JPEG · Live", "WebRTC → JPEG · Live"],
+    fullscreen: ["Vollbild", "Fullscreen"],
+    exitFullscreen: ["Vollbild beenden", "Exit fullscreen"],
+    fullscreenFallback: [
+      "Browser-Vollbild nicht verfügbar. Das Livebild wird im Fenster vergrößert.",
+      "Browser fullscreen is unavailable. The live view is expanded in this window.",
+    ],
     capture: ["◎ Foto", "◎ Photo"],
     startRecording: ["Aufnehmen", "Record"],
     stopRecording: ["Aufnahme beenden", "Stop recording"],
@@ -240,7 +248,52 @@
     });
     $("#language-button").textContent = s.lang === "de" ? "EN" : "DE";
     $("#breadcrumb-current").textContent = t(s.view);
+    syncFullscreen();
     if (s.user) render();
+  }
+  function syncFullscreen() {
+    const fullscreen =
+      document.fullscreenElement === $("#live-stage") ||
+      document.documentElement.classList.contains("live-expanded");
+    const entry = $("#fullscreen-button");
+    const exit = $("#fullscreen-exit");
+    entry.setAttribute("aria-expanded", String(fullscreen));
+    entry.title = t("fullscreen");
+    exit.title = t("exitFullscreen");
+    exit.hidden = !fullscreen;
+    if (fullscreen === s.liveFullscreen) return;
+    s.liveFullscreen = fullscreen;
+    if (fullscreen) exit.focus({ preventScroll: true });
+    else if (s.user && s.view === "overview")
+      entry.focus({ preventScroll: true });
+  }
+  async function exitLiveFullscreen() {
+    s.fullscreenGeneration++;
+    document.documentElement.classList.remove("live-expanded");
+    if (document.fullscreenElement === $("#live-stage"))
+      await document.exitFullscreen();
+    syncFullscreen();
+  }
+  async function enterLiveFullscreen() {
+    const generation = ++s.fullscreenGeneration;
+    const stage = $("#live-stage");
+    let entered = false;
+    if (stage.requestFullscreen && document.fullscreenEnabled !== false) {
+      try {
+        await stage.requestFullscreen();
+        entered = true;
+      } catch {
+        // A denied request still permits an expanded view within the application.
+      }
+    }
+    if (generation !== s.fullscreenGeneration) {
+      if (entered) await exitLiveFullscreen();
+      return;
+    }
+    if (entered) return;
+    document.documentElement.classList.add("live-expanded");
+    syncFullscreen();
+    toast(t("fullscreenFallback"));
   }
   function switchView(view) {
     if (
@@ -248,6 +301,7 @@
     )
       return;
     s.view = view;
+    if (view !== "overview") act(exitLiveFullscreen);
     $$(".nav-item").forEach((e) =>
       e.classList.toggle("active", e.dataset.view === view),
     );
@@ -266,6 +320,7 @@
   }
   function showLogin() {
     s.user = null;
+    act(exitLiveFullscreen);
     s.refreshGeneration++;
     s.cameraDirty = s.storageDirty = s.dirtyControls = false;
     $("#user-form").reset();
@@ -1078,12 +1133,29 @@
   $("#live-video").addEventListener("error", () =>
     jpegPreview(s.streamGeneration),
   );
-  $("#fullscreen-button").addEventListener("click", () =>
-    act(async () => {
-      if (document.fullscreenElement) await document.exitFullscreen();
-      else await $("#live-stage").requestFullscreen();
-    }),
+  $("#fullscreen-button").addEventListener("click", (event) =>
+    act(
+      s.liveFullscreen ? exitLiveFullscreen : enterLiveFullscreen,
+      event.currentTarget,
+    ),
   );
+  $("#fullscreen-exit").addEventListener("click", () =>
+    act(exitLiveFullscreen),
+  );
+  document.addEventListener("fullscreenchange", syncFullscreen);
+  document.addEventListener("keydown", (event) => {
+    if (!s.liveFullscreen) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      act(exitLiveFullscreen);
+    } else if (
+      event.key === "Tab" &&
+      document.documentElement.classList.contains("live-expanded")
+    ) {
+      event.preventDefault();
+      $("#fullscreen-exit").focus({ preventScroll: true });
+    }
+  });
   for (const id of ["exposure-range", "brightness-range", "focus-range"])
     $("#" + id).addEventListener("input", () => {
       s.dirtyControls = true;

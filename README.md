@@ -86,6 +86,8 @@ The portable recording pipeline decodes and re-encodes frames. Encoder selection
 
 The browser can display current JPEG frames through the authenticated application without MediaMTX. It requests one frame at a time and cancels pending work when the camera, view, or tab changes. This prevents multipart browser buffering from replaying an old live view. The authenticated `/stream.mjpg` endpoint remains available for other clients.
 
+Use **Fullscreen** above the live image to enlarge JPEG, WebRTC, or native HLS playback. **Exit fullscreen** remains inside the image; Escape also returns to the overview. Browsers that cannot open native fullscreen expand the live view within the current window. Entering or exiting fullscreen keeps the current stream running. Session expiry closes fullscreen.
+
 Optional MediaMTX v1.21.2 adds RTSP publishing, WebRTC/WHEP, and HLS. Automatic mode prefers WebRTC; the live publisher uses wall-clock timestamps when frames are skipped. The managed server is loopback-only; remote WebRTC needs a separately secured MediaMTX deployment with reachable ICE addresses and, where required, TURN. HLS currently uses native browser support, with latest-frame JPEG fallback elsewhere. See the [latency and recovery behavior](docs/DEPLOYMENT.md#live-view-latency-and-recovery) for overload and connection limits.
 
 See [MediaMTX setup](docs/DEPLOYMENT.md#optional-mediamtx) before exposing any media ports. A running HTTP health check does not prove that a camera or streaming path is ready.

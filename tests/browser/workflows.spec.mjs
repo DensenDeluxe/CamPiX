@@ -359,6 +359,166 @@ test("viewer cannot capture or administer; logout revokes the session", async ({
   expect((await page.request.get("/api/v1/cameras")).status()).toBe(401);
 });
 
+test("live JPEG fullscreen has a visible exit and supports keyboard and localization", async ({
+  page,
+}) => {
+  await signin(page, "viewer");
+  await expect(page.locator("#live-badge")).toBeVisible();
+  const entry = page.locator("#fullscreen-button");
+  await entry.click();
+  await expect
+    .poll(() => page.evaluate(() => document.fullscreenElement?.id))
+    .toBe("live-stage");
+  const exit = page.locator("#live-stage").getByRole("button", {
+    name: "Vollbild beenden",
+    exact: true,
+  });
+  await expect(exit).toBeVisible();
+  await expect(exit).toBeFocused();
+  await expect(page.locator("#live-image")).toHaveCSS("object-fit", "contain");
+  expect(
+    await page.locator("#live-stage").evaluate((stage) => {
+      const bounds = stage.getBoundingClientRect();
+      return bounds.width === innerWidth && bounds.height === innerHeight;
+    }),
+  ).toBe(true);
+  await page.screenshot({ path: "test-results/live-fullscreen-jpeg.png" });
+  await exit.press("Enter");
+  await expect
+    .poll(() => page.evaluate(() => document.fullscreenElement))
+    .toBeNull();
+  await expect(entry).toBeFocused();
+  await expect(entry).toHaveAccessibleName("Vollbild");
+  await expect(entry).toHaveAttribute("aria-expanded", "false");
+  await entry.press("Enter");
+  await expect(exit).toBeVisible();
+  await expect(entry).toHaveAttribute("aria-expanded", "true");
+  await page.keyboard.press("Escape");
+  await expect(exit).toBeHidden();
+  await expect(entry).toBeFocused();
+  await entry.click();
+  await expect(exit).toBeVisible();
+  await page.evaluate(() => document.exitFullscreen());
+  await expect(exit).toBeHidden();
+  await expect(entry).toBeFocused();
+  await page.locator("#language-button").click();
+  await expect(entry).toHaveAccessibleName("Fullscreen");
+  await entry.click();
+  await page
+    .locator("#live-stage")
+    .getByRole("button", { name: "Exit fullscreen", exact: true })
+    .click();
+  await expect(page.locator("#live-badge")).toBeVisible();
+});
+
+for (const mode of ["unavailable", "denied"]) {
+  test(`mobile live view expands when browser fullscreen is ${mode} and cleans up on session expiry`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await signin(page, "operator");
+    await expect(page.locator("#live-badge")).toBeVisible();
+    await page.evaluate((mode) => {
+      document.querySelector("#live-stage").requestFullscreen =
+        mode === "unavailable"
+          ? undefined
+          : () => Promise.reject(new Error("Browser denied fullscreen"));
+    }, mode);
+    const entry = page.locator("#fullscreen-button");
+    const exit = page.locator("#fullscreen-exit");
+    await entry.click();
+    await expect(page.locator("html")).toHaveClass(/live-expanded/);
+    await expect(exit).toBeVisible();
+    await expect(exit).toBeFocused();
+    await expect(entry).toHaveAttribute("aria-expanded", "true");
+    for (const viewport of [
+      { width: 390, height: 844 },
+      { width: 844, height: 390 },
+    ]) {
+      await page.setViewportSize(viewport);
+      expect(
+        await page.locator("#live-stage").evaluate((stage) => {
+          const bounds = stage.getBoundingClientRect();
+          return (
+            bounds.x === 0 &&
+            bounds.y === 0 &&
+            bounds.width === innerWidth &&
+            bounds.height === innerHeight
+          );
+        }),
+      ).toBe(true);
+      await expect(exit).toBeInViewport({ ratio: 1 });
+      if (mode === "unavailable" && viewport.width === 390)
+        await page.screenshot({
+          path: "test-results/live-expanded-mobile.png",
+        });
+    }
+    await page.keyboard.press("Tab");
+    await expect(exit).toBeFocused();
+    await page.keyboard.press("Shift+Tab");
+    await expect(exit).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(page.locator("html")).not.toHaveClass(/live-expanded/);
+    await expect(entry).toBeFocused();
+    await expect(entry).toHaveAttribute("aria-expanded", "false");
+    await entry.click();
+    await expect(exit).toBeVisible();
+    await page.route("**/api/v1/cameras/demo/preview.jpg", (route) =>
+      route.fulfill({
+        status: 401,
+        json: { detail: "Authentication required" },
+      }),
+    );
+    await expect(page.locator("#login-screen")).toBeVisible();
+    await expect(page.locator("html")).not.toHaveClass(/live-expanded/);
+    await expect(page.locator("#live-image")).not.toHaveAttribute("src");
+    await expect(exit).toBeHidden();
+  });
+}
+
+test("session expiry exits native live fullscreen and clears the frame", async ({
+  page,
+}) => {
+  await signin(page);
+  await expect(page.locator("#live-badge")).toBeVisible();
+  await page.locator("#fullscreen-button").click();
+  await expect
+    .poll(() => page.evaluate(() => document.fullscreenElement?.id))
+    .toBe("live-stage");
+  await page.route("**/api/v1/cameras/demo/preview.jpg", (route) =>
+    route.fulfill({ status: 401, json: { detail: "Authentication required" } }),
+  );
+  await expect(page.locator("#login-screen")).toBeVisible();
+  await expect
+    .poll(() => page.evaluate(() => document.fullscreenElement))
+    .toBeNull();
+  await expect(page.locator("#live-image")).not.toHaveAttribute("src");
+  await expect(page.locator("#fullscreen-exit")).toBeHidden();
+});
+
+test("a pending fullscreen rejection cannot reopen the live view after session expiry", async ({
+  page,
+}) => {
+  await signin(page);
+  await expect(page.locator("#live-badge")).toBeVisible();
+  await page.evaluate(() => {
+    document.querySelector("#live-stage").requestFullscreen = () =>
+      new Promise((_, reject) => {
+        window.rejectPendingFullscreen = () => reject(new Error("Denied"));
+      });
+  });
+  await page.locator("#fullscreen-button").click();
+  await expect(page.locator("#fullscreen-button")).toBeDisabled();
+  await page.route("**/api/v1/cameras/demo/preview.jpg", (route) =>
+    route.fulfill({ status: 401, json: { detail: "Authentication required" } }),
+  );
+  await expect(page.locator("#login-screen")).toBeVisible();
+  await page.evaluate(() => window.rejectPendingFullscreen());
+  await expect(page.locator("#fullscreen-button")).toBeEnabled();
+  await expect(page.locator("html")).not.toHaveClass(/live-expanded/);
+  await expect(page.locator("#fullscreen-exit")).toBeHidden();
+});
+
 test("mobile navigation and layout remain usable", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await signin(page, "operator");
@@ -447,6 +607,13 @@ test("optional MediaMTX delivers real WebRTC video and authenticated HLS", async
     path: "test-results/webrtc-desktop.png",
     fullPage: true,
   });
+  await page.locator("#fullscreen-button").click();
+  await expect
+    .poll(() => page.evaluate(() => document.fullscreenElement?.id))
+    .toBe("live-stage");
+  await expect(page.locator("#fullscreen-exit")).toBeVisible();
+  await expect(page.locator("#live-video")).toBeVisible();
+  await expect(page.locator("#live-video")).toHaveCSS("object-fit", "contain");
   const jpeg = await (
     await page.request.get("/api/v1/cameras/demo/preview.jpg")
   ).body();
@@ -468,5 +635,12 @@ test("optional MediaMTX delivers real WebRTC video and authenticated HLS", async
   }
   await expect(page.locator("#actual-transport")).toHaveText("JPEG");
   await expect(page.locator("#live-image")).toBeVisible();
+  await expect
+    .poll(() => page.evaluate(() => document.fullscreenElement?.id))
+    .toBe("live-stage");
+  await page.locator("#fullscreen-exit").click();
+  await expect
+    .poll(() => page.evaluate(() => document.fullscreenElement))
+    .toBeNull();
   await page.locator(".nav-item[data-view=media]").click();
 });

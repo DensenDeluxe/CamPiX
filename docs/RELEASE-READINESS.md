@@ -183,6 +183,14 @@ These ages start when a complete JPEG reaches CamPiX, not when the sensor expose
 
 The installed release was not replaced, and no commit or publication was performed. The checkout correction and packaged artifact still require an explicit deployment update to affect that separate installation. No data migration is needed; rollback restores the previous source release and its former latency behavior.
 
+## Live fullscreen controls — 12 October 2026
+
+The existing fullscreen trigger was an ambiguous icon outside the fullscreen element, so it disappeared on entry. The live view now has localized entry and in-view exit buttons, Escape support, focus/state synchronization, and an expanded-window fallback when native fullscreen is unavailable or denied. Session expiry and view changes close fullscreen; late fullscreen requests cannot reopen an expired session's live view. Fullscreen transitions preserve the active stream.
+
+The installed Chrome browser suite recorded **17 passes and no skips**, including five fullscreen regression cases and real MediaMTX v1.21.2 WebRTC/HLS integration. The WebRTC-to-JPEG fallback retains fullscreen. Media testing used a separate temporary loopback instance and ICE listener because the installed service occupied the managed ports; that deployment was not stopped or changed, and all test processes were cleaned up. Sources were explicitly synthetic. Mobile portrait/landscape layouts and unavailable/denied APIs were exercised in desktop Chrome, rather than on physical mobile devices.
+
+Lock consistency, JavaScript syntax, documentation links, formatting, and diff checks passed. Python/service sources are unchanged; the Python suite and package builds were not rerun for this UI correction. Safari/native HLS fullscreen, physical mobile browsers, and an installed-release update remain unverified. No dependency, schema, commit, publication, or deployment change was made.
+
 ## Remaining production gates
 
 1. Test at least Pi 4/CM4 and Pi 5/CM5 on their target operating systems with official and relevant Arducam/third-party sensors. Qualify UVC devices and at least one RTSP camera separately. Device discovery is not full functional certification.
