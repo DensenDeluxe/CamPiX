@@ -49,3 +49,12 @@ Managed MediaMTX tests use fixed loopback ports. Run Python and browser suites s
 - Commit subjects and pull-request descriptions should explain the actual changes. Do not add tool/model credits, generated-by notices, session links, or automatic co-author trailers.
 - Never force-push, reset user work, delete remote history, or change branch protection without explicit approval. Fetch and compare histories before synchronizing.
 - Finish with what changed, checks actually run, remaining risks, and any unverified deployment or hardware boundary. Do not claim production readiness from instructions or synthetic tests alone.
+
+## Cursor Cloud specific instructions
+
+Cloud setup installs `ffmpeg`, `v4l-utils`, uv 0.13.0, and the locked Python 3.11 environment with the `test` and `v4l2` extras (`uv sync --locked --python 3.11 --extra test --extra v4l2`), then `npm ci --ignore-scripts`. Verified MediaMTX v1.21.2 is `/opt/campix/mediamtx`. Chrome is `/usr/bin/google-chrome`.
+
+- Export `CAMPIX_TEST_CHROME=/usr/bin/google-chrome` before `npm test` so Playwright uses the installed Chrome.
+- Export `CAMPIX_TEST_MEDIAMTX_BINARY=/opt/campix/mediamtx` before the optional media-server cases. Run `uv run --no-sync pytest -q` and `npm test` one after the other; both bind the same loopback MediaMTX ports.
+- Boot runs explicit demo mode in the foreground at `http://127.0.0.1:8080`, with data in `/var/tmp/campix-dev`. That directory is not a user's `.campix/` state. The service does not create an administrator. Stop the process listening on port 8080, run `uv run --no-sync campixd --data-dir /var/tmp/campix-dev init-admin --password-stdin`, then start `uv run --no-sync campixd --data-dir /var/tmp/campix-dev serve --demo` again before signing in.
+- `/healthz` and synthetic demo snapshots show that the service is running. They do not qualify a physical camera or encoder.
