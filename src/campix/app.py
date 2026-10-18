@@ -194,6 +194,7 @@ def create_app(settings: Settings | None = None):
         "limit",
         "offset",
         "kind",
+        "q",
         "download",
         "user_id",
         "media_id",
@@ -499,8 +500,9 @@ def create_app(settings: Settings | None = None):
         offset: int = Query(0, ge=0),
         kind: str | None = None,
         camera_id: str | None = None,
+        q: str = Query("", max_length=80, pattern=r"^[^\x00-\x1f\x7f]*$"),
     ):
-        return store.list(limit, offset, kind, camera_id)
+        return store.list(limit, offset, kind, camera_id, q.strip())
 
     @app.get("/api/v1/media/{media_id}/file", dependencies=[Depends(viewer)])
     def media_file(media_id: str, download: bool = False):

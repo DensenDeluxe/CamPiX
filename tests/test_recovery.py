@@ -91,6 +91,44 @@ def test_timelapse_job_completes_and_rejects_invalid_selection(client, applicati
     assert client.get("/api/v1/media").json()["total"] == 4
 
 
+def test_media_search_covers_every_page_and_keeps_wildcards_literal(client, application):
+    assert client.get("/api/v1/media", params={"q": "needle"}).status_code == 401
+    signin(client, "viewer")
+    now = time.time()
+    rows = [
+        (f"{index:032x}", "demo", "snapshot", f"20261018_{index:06d}.jpg", now - index, 10, "manual")
+        for index in range(30)
+    ]
+    rows.append(("a" * 32, "demo", "snapshot", "special_100%_name.jpg", now - 100, 10, "manual"))
+    rows.append(("b" * 32, "demo", "snapshot", "special_100Xname.jpg", now - 101, 10, "manual"))
+    rows.append(("c" * 32, "other", "video", "special_100%_name.mp4", now - 102, 10, "manual"))
+    for row in rows:
+        application.state.db.execute(
+            "INSERT INTO media(id,camera_id,kind,filename,created,size,trigger) VALUES (?,?,?,?,?,?,?)",
+            row,
+        )
+
+    first_page = client.get("/api/v1/media", params={"limit": 24, "offset": 0}).json()
+    assert first_page["total"] == 33
+    assert "20261018_000029.jpg" not in {item["filename"] for item in first_page["items"]}
+    found = client.get("/api/v1/media", params={"q": "  000029  ", "limit": 24}).json()
+    assert found["total"] == 1 and found["items"][0]["filename"] == "20261018_000029.jpg"
+    literal = client.get("/api/v1/media", params={"q": "100%_n", "kind": "snapshot"}).json()
+    assert [item["filename"] for item in literal["items"]] == ["special_100%_name.jpg"]
+    camera = client.get("/api/v1/media", params={"q": "100%", "camera_id": "other"}).json()
+    assert [item["filename"] for item in camera["items"]] == ["special_100%_name.mp4"]
+    assert client.get("/api/v1/media", params={"q": "%"}).json()["total"] == 2
+    assert client.get("/api/v1/media", params={"q": "' OR 1=1 --"}).json()["total"] == 0
+    assert client.get("/api/v1/media", params={"q": "   "}).json()["total"] == 33
+
+    private = "test-only-private-search\nmarker"
+    rejected = client.get("/api/v1/media", params={"q": private})
+    assert rejected.status_code == 422
+    assert private not in rejected.text and "marker" not in rejected.text
+    assert rejected.json()["detail"][0]["loc"] == ["query", "q"]
+    assert client.get("/api/v1/media", params={"q": "a" * 81}).status_code == 422
+
+
 def test_storage_reserve_and_retention_keep_locked_items(client, application, monkeypatch):
     signin(client)
     wait_online(client)

@@ -56,6 +56,8 @@ Synthetic capture is permitted only in explicit demo mode. Previously saved synt
 
 JPEG/MP4 files are written to private temporary paths and enter the media index only after successful finalization. Deletion first renames a file as a journal step; a database failure restores it. Startup removes missing indexed entries while retaining interrupted or unindexed files. Automatic MP4 repair after power loss is not claimed.
 
+The media index is listed newest first and can be filtered by kind, camera, and a literal filename substring. `%`, `_`, and `\` in that substring match themselves. The library view searches the whole index; pagination does not hide older matches. The overview keeps the three newest items independent of the library page, kind, or search. A library timelapse exports every matching snapshot, at most 500, in capture order.
+
 SQLite access is protected by transactions and thread synchronization. Schema 1 migrates to schema 2; unknown newer schemas are rejected rather than downgraded. An operating-system lock prevents two active services from using the same data directory. Database backups exclude active sessions. Media files must be backed up separately.
 
 ## Media plane and trust boundary

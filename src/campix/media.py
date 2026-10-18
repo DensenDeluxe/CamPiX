@@ -68,12 +68,17 @@ class MediaStore:
         item["locked"] = bool(item["locked"])
         return item
 
-    def list(self, limit=100, offset=0, kind=None, camera_id=None):
+    def list(self, limit=100, offset=0, kind=None, camera_id=None, query=""):
         clauses, args = [], []
         for key, value in (("kind", kind), ("camera_id", camera_id)):
             if value:
                 clauses.append(key + "=?")
                 args.append(value)
+        if query:
+            # User text is a literal substring. LIKE wildcards must not widen the match.
+            literal = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            clauses.append("filename LIKE ? ESCAPE '\\'")
+            args.append(f"%{literal}%")
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
         total = self.db.one("SELECT COUNT(*) AS count FROM media" + where, args)["count"]
         items = self.db.all(

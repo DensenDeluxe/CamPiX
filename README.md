@@ -24,7 +24,7 @@ The familiar camera-appliance workflow should not depend on an obsolete camera s
 
 - **Capture adapters:** Picamera2/libcamera, Linux V4L2, Windows DirectShow webcams through FFmpeg, RTSP/HTTP network sources, and an existing local legacy JPEG preview. Independent capture workers reconnect after failures.
 - **Photos and recordings:** real JPEG snapshots and H.264/MP4 files, timed recordings, bounded pre-roll, and motion-triggered recording with renewable post-roll.
-- **Media library:** playback, authenticated downloads, locking, deletion, retention rules, storage-reserve protection, and queued timelapse exports.
+- **Media library:** playback, authenticated downloads, locking, deletion, retention rules, storage-reserve protection, filename search across the whole library, and queued timelapse exports.
 - **Camera management:** multiple profiles and controls discovered from the selected adapter, rather than invented hardware support.
 - **Schedules:** persistent interval jobs with time windows, weekdays, and time zones.
 - **Authenticated control plane:** FastAPI, REST/OpenAPI, WebSocket events, SQLite, system metrics, Argon2id passwords, viewer/operator/admin roles, CSRF protection, and revocable sessions.

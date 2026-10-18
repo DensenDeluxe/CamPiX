@@ -9,12 +9,16 @@
     selected: "",
     system: null,
     media: [],
+    recent: [],
     schedules: [],
     events: [],
     view: "overview",
     kind: "",
     offset: 0,
     total: 0,
+    libraryTotal: 0,
+    query: "",
+    searchTimer: null,
     lang: localStorage.getItem("campix-language") || "de",
     socket: null,
     peer: null,
@@ -150,6 +154,8 @@
     timezone: ["Zeitzone", "Timezone"],
     role: ["Rolle", "Role"],
     empty: ["Noch keine Einträge.", "No entries yet."],
+    emptySearch: ["Keine passenden Medien.", "No matching media."],
+    search: ["Medien suchen", "Search media"],
     saved: ["Gespeichert", "Saved"],
     captured: ["Foto gespeichert", "Photo saved"],
     recorded: ["Aufnahme abgeschlossen", "Recording finalized"],
@@ -174,8 +180,16 @@
       "HLS is not supported natively; using live JPEG.",
     ],
     timelapseHint: [
-      "Alle Fotos der aktuellen Medienseite in zeitlicher Reihenfolge als Video exportieren?",
-      "Export all photos on the current media page, ordered by capture time, as a video?",
+      "{count} passende Fotos in zeitlicher Reihenfolge als Video exportieren?",
+      "Export {count} matching photos, ordered by capture time, as a video?",
+    ],
+    timelapseTooMany: [
+      "Mehr als 500 Fotos passen. Grenze die Suche ein, bevor du exportierst.",
+      "More than 500 photos match. Narrow the search before exporting.",
+    ],
+    needPhotos: [
+      "Mindestens zwei Fotos erforderlich.",
+      "At least two photos required.",
     ],
   };
   const t = (key) => words[key]?.[s.lang === "de" ? 0 : 1] || key;
@@ -264,6 +278,8 @@
       e.textContent = t(e.dataset.i18n);
     });
     $("#language-button").textContent = s.lang === "de" ? "EN" : "DE";
+    $("#media-search").placeholder = t("search");
+    $("#media-search").setAttribute("aria-label", t("search"));
     $("#breadcrumb-current").textContent = t(s.view);
     syncFullscreen();
     if (s.user) render();
@@ -347,6 +363,7 @@
     if (s.socket) s.socket.close();
     stopStream();
     s.csrf = "";
+    clearTimeout(s.searchTimer);
     $$("dialog[open]").forEach((d) => d.close());
   }
   async function connect() {
@@ -363,20 +380,29 @@
   async function refresh() {
     if (!s.user) return;
     const generation = ++s.refreshGeneration;
-    const [cameras, system, media, schedules, events] = await Promise.all([
-      api("/cameras"),
-      api("/system"),
-      api(
-        `/media?limit=24&offset=${s.offset}${s.kind ? "&kind=" + s.kind : ""}`,
-      ),
-      api("/schedules"),
-      api("/events?limit=10"),
-    ]);
+    const [cameras, system, media, recent, schedules, events] =
+      await Promise.all([
+        api("/cameras"),
+        api("/system"),
+        api(
+          mediaPath({
+            limit: 24,
+            offset: s.offset,
+            kind: s.kind,
+            query: s.query,
+          }),
+        ),
+        api(mediaPath({ limit: 3, offset: 0 })),
+        api("/schedules"),
+        api("/events?limit=10"),
+      ]);
     if (!s.user || generation !== s.refreshGeneration) return;
     s.cameras = cameras;
     s.system = system;
     s.media = media.items;
     s.total = media.total;
+    s.recent = recent.items;
+    s.libraryTotal = recent.total;
     s.schedules = schedules;
     s.events = events;
     if (!cameras.some((c) => c.id === s.selected)) {
@@ -440,7 +466,7 @@
       `${Math.floor(sys.uptime_seconds / 3600)}h ${Math.floor((sys.uptime_seconds % 3600) / 60)}m`;
     $("#system-summary").textContent =
       `${sys.platform.model} · ${bytes(sys.process_memory_bytes)} RAM${sys.temperature_c === null ? "" : " · " + sys.temperature_c.toFixed(1) + " °C"}`;
-    $("#nav-media-count").textContent = s.total;
+    $("#nav-media-count").textContent = s.libraryTotal;
     options($("#camera-select"));
     options($("#schedule-camera"));
     $("#synthetic-option").hidden = !sys.demo;
@@ -852,18 +878,26 @@
     card.addEventListener("click", () => openMedia(item));
     return card;
   }
+  function mediaPath({ limit, offset, kind = "", query = "" }) {
+    const params = new URLSearchParams({
+      limit: String(limit),
+      offset: String(offset),
+    });
+    if (kind) params.set("kind", kind);
+    const text = query.trim();
+    if (text) params.set("q", text);
+    return "/media?" + params;
+  }
   function renderMedia() {
-    const search = $("#media-search").value.trim().toLowerCase();
-    const items = s.media.filter((i) =>
-      i.filename.toLowerCase().includes(search),
-    );
-    $("#media-grid").replaceChildren(...items.map((i) => mediaCard(i)));
-    if (!items.length)
-      $("#media-grid").append(make("p", "empty-message", t("empty")));
-    $("#recent-media").replaceChildren(
-      ...s.media.slice(0, 3).map((i) => mediaCard(i, true)),
-    );
+    $("#media-grid").replaceChildren(...s.media.map((i) => mediaCard(i)));
     if (!s.media.length)
+      $("#media-grid").append(
+        make("p", "empty-message", s.query ? t("emptySearch") : t("empty")),
+      );
+    $("#recent-media").replaceChildren(
+      ...s.recent.map((i) => mediaCard(i, true)),
+    );
+    if (!s.recent.length)
       $("#recent-media").append(make("p", "empty-message", t("empty")));
     $("#media-page").textContent =
       `${Math.floor(s.offset / 24) + 1} · ${s.total}`;
@@ -1449,7 +1483,16 @@
       }),
     ),
   );
-  $("#media-search").addEventListener("input", renderMedia);
+  $("#media-search").addEventListener("input", () => {
+    clearTimeout(s.searchTimer);
+    s.searchTimer = setTimeout(() => {
+      const next = $("#media-search").value.trim();
+      if (next === s.query) return;
+      s.query = next;
+      s.offset = 0;
+      act(refresh);
+    }, 250);
+  });
   $("#media-prev").addEventListener("click", () =>
     act(async () => {
       s.offset = Math.max(0, s.offset - 24);
@@ -1464,17 +1507,17 @@
   );
   $("#timelapse-button").addEventListener("click", (e) =>
     act(async () => {
-      const ids = s.media
+      const library = await api(
+        mediaPath({ limit: 500, offset: 0, kind: "snapshot", query: s.query }),
+      );
+      if (library.total > 500) throw new Error(t("timelapseTooMany"));
+      const ids = library.items
         .filter((i) => i.kind === "snapshot")
         .sort((a, b) => a.created - b.created)
         .map((i) => i.id);
-      if (ids.length < 2)
-        throw new Error(
-          s.lang === "de"
-            ? "Mindestens zwei Fotos erforderlich."
-            : "At least two photos required.",
-        );
-      if (!confirm(t("timelapseHint"))) return;
+      if (ids.length < 2) throw new Error(t("needPhotos"));
+      if (!confirm(t("timelapseHint").replace("{count}", String(ids.length))))
+        return;
       await api("/timelapse", "POST", { media_ids: ids, fps: 10 });
       toast(
         s.lang === "de"
