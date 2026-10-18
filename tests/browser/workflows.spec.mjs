@@ -626,6 +626,67 @@ test("mobile navigation and layout remain usable", async ({ page }) => {
   ).toBeTruthy();
 });
 
+test("library search reaches older photos and timelapse uses the match", async ({
+  page,
+}) => {
+  test.setTimeout(90000);
+  await signin(page);
+  const session = await page.request.get("/api/v1/auth/me");
+  expect(session.ok()).toBeTruthy();
+  const { csrf } = await session.json();
+  const capture = async () => {
+    const response = await page.request.post("/api/v1/cameras/demo/snapshot", {
+      headers: { "X-CSRF-Token": csrf },
+    });
+    expect(response.ok()).toBeTruthy();
+    return response.json();
+  };
+  const older = await capture();
+  for (let index = 0; index < 24; index += 1) await capture();
+  await page.locator(".nav-item[data-view=media]").click();
+  await expect(page.locator("#media-grid .gallery-card")).toHaveCount(24);
+  await expect(page.locator("#media-grid")).not.toContainText(older.filename);
+  const libraryTotal = await page.locator("#nav-media-count").textContent();
+  await page.locator("#media-search").fill(older.filename);
+  await expect(page.locator("#media-grid .gallery-card")).toHaveCount(1);
+  await expect(page.locator("#media-grid")).toContainText(older.filename);
+  await expect(page.locator("#media-page")).toHaveText("1 · 1");
+  await expect(page.locator("#nav-media-count")).toHaveText(libraryTotal);
+  await page.screenshot({
+    path: "test-results/media-search.png",
+    fullPage: true,
+  });
+  await page.locator(".nav-item[data-view=overview]").click();
+  await expect(page.locator("#recent-media .media-card")).toHaveCount(3);
+  await expect(page.locator("#recent-media")).not.toContainText(older.filename);
+  await page.locator(".nav-item[data-view=media]").click();
+  await page.locator("#media-search").fill("");
+  await expect(page.locator("#media-grid .gallery-card")).toHaveCount(24);
+  const photos = await page.request.get(
+    "/api/v1/media?kind=snapshot&limit=500",
+  );
+  expect(photos.ok()).toBeTruthy();
+  const photoList = await photos.json();
+  expect(photoList.total).toBeGreaterThan(24);
+  expect(photoList.total).toBeLessThanOrEqual(500);
+  let exported = null;
+  await page.route("**/api/v1/timelapse", async (route) => {
+    exported = route.request().postDataJSON();
+    await route.fulfill({
+      status: 202,
+      contentType: "application/json",
+      body: JSON.stringify({ id: "browser-timelapse", status: "queued" }),
+    });
+  });
+  page.once("dialog", (dialog) => {
+    expect(dialog.message()).toContain(String(photoList.total));
+    dialog.accept();
+  });
+  await page.locator("#timelapse-button").click();
+  await expect.poll(() => exported?.media_ids?.length).toBe(photoList.total);
+  expect(exported.media_ids).toContain(older.id);
+});
+
 test("theme, language and authenticated downloads", async ({ page }) => {
   await signin(page);
   await page.locator("#language-button").click();
