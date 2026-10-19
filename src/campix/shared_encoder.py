@@ -234,6 +234,10 @@ class SharedEncoder:
                     if current == sequence:
                         continue
                     sequence = current
+                    # Under sustained host pressure, encode every other JPEG. Capture
+                    # timestamps stay on the frames that are actually offered.
+                    if getattr(self.camera, "shed_level", 0) >= 2 and sequence % 2 == 0:
+                        continue
                     self._offer(process, jpeg, captured)
             except (
                 CaptureError,

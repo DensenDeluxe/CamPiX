@@ -28,7 +28,7 @@ Administrator-defined camera sources can contact private networks or open an exi
 
 Loopback MediaMTX trusts local processes. Do not forward RTSP, API, ICE, or HLS ports into an untrusted network without additional controls. WAN/TURN configuration and external protocol ACLs belong to deployment qualification.
 
-CamPiX currently provides no MFA, SSO, untrusted-plugin sandbox, antivirus/media-parser sandbox, LUKS key management, or guaranteed denial-of-service protection against unlimited read streams. Use a reverse proxy with appropriate limits or a VPN where applicable.
+Each camera accepts at most four concurrent JPEG preview or MJPEG readers. Further readers receive HTTP 429. WebRTC viewers share the one encoded stream through MediaMTX and do not take those slots. This is a per-camera application limit, not a complete denial-of-service control. CamPiX currently provides no MFA, SSO, untrusted-plugin sandbox, antivirus/media-parser sandbox, LUKS key management, or a guarantee against every read-stream pattern. Use a reverse proxy with appropriate limits or a VPN where applicable.
 
 ## Release review and reporting
 

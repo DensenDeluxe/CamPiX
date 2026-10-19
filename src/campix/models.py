@@ -27,6 +27,15 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
 
+class MotionRegion(StrictModel):
+    """Normalized rectangle in the analysis frame. Origin is the top left."""
+
+    x: float = Field(ge=0, le=1)
+    y: float = Field(ge=0, le=1)
+    w: float = Field(gt=0, le=1)
+    h: float = Field(gt=0, le=1)
+
+
 class CameraConfig(StrictModel):
     id: str = Field(pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}$")
     name: str = Field(min_length=1, max_length=80)
@@ -43,6 +52,7 @@ class CameraConfig(StrictModel):
     motion_pixel_delta: int = Field(25, ge=5, le=200)
     motion_frames: int = Field(3, ge=1, le=30)
     motion_postroll: int = Field(10, ge=1, le=300)
+    motion_regions: list[MotionRegion] = Field(default_factory=list, max_length=8)
     encoder: EncoderName = "auto"
     controls: dict[str, float | int | bool] = Field(default_factory=dict, max_length=32)
 
@@ -64,6 +74,9 @@ class CameraConfig(StrictModel):
             raise ValueError(
                 "GStreamer vendor pipelines require an installed adapter; arbitrary pipelines are disabled"
             )
+        for region in self.motion_regions:
+            if region.x + region.w > 1 or region.y + region.h > 1:
+                raise ValueError("Motion region must stay inside the frame")
         if self.backend == "legacy":
             from pathlib import Path
 
@@ -97,6 +110,7 @@ class CameraPatch(StrictModel):
     motion_threshold: float | None = Field(None, ge=0.005, le=0.9)
     preroll_seconds: int | None = Field(None, ge=0, le=10)
     encoder: EncoderName | None = None
+    motion_regions: list[MotionRegion] | None = Field(None, max_length=8)
 
 
 class UserCreate(StrictModel):

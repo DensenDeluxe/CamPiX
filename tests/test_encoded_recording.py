@@ -313,8 +313,11 @@ def test_real_recording_remux_preserves_preroll_clock_and_packet_count(tmp_path,
                 timeout=10,
             )
         )
-        assert report["streams"][0]["codec_name"] == "h264"
-        assert report["streams"][0]["nb_frames"] == "11"
+        stream = report["streams"][0]
+        assert stream["codec_name"] == "h264"
+        packet_count = sum(item.get("codec_type") == "video" for item in report["packets"])
+        assert stream.get("nb_frames", str(packet_count)) == "11"
+        assert packet_count == 11
         stamps = [float(item["pts_time"]) for item in report["packets"]]
         assert stamps[-1] - stamps[0] == pytest.approx(2, abs=0.002)
         assert result["duration"] == pytest.approx(2 + 1 / 30, abs=0.002)

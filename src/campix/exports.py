@@ -1,12 +1,11 @@
 from __future__ import annotations
 
+import io
 import queue
 import subprocess
-import tempfile
 import threading
 import time
 import uuid
-from pathlib import Path
 
 from PIL import Image, ImageOps
 
@@ -59,13 +58,46 @@ class ExportService:
     def _encode(self, items, fps):
         media_id, destination = self.store.reserve("mp4")
         partial = destination.with_suffix(".mp4.partial")
-        with tempfile.TemporaryDirectory(
-            prefix="campix-export-", dir=self.settings.data_dir
-        ) as folder:
-            size = None
-            for index, item in enumerate(items):
-                if self.halt.is_set():
-                    raise RuntimeError("Export cancelled on shutdown")
+        command = [
+            self.settings.ffmpeg,
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "image2pipe",
+            "-framerate",
+            str(fps),
+            "-i",
+            "pipe:0",
+            "-an",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "23",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+frag_keyframe+empty_moov+default_base_moof",
+            "-f",
+            "mp4",
+            str(partial),
+        ]
+        self.proc = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=NO_WINDOW,
+        )
+        deadline = time.monotonic() + 120
+        size = None
+        try:
+            for item in items:
+                if self.halt.is_set() or time.monotonic() > deadline:
+                    raise RuntimeError("Export cancelled or timed out")
                 self.store.check_space()
                 with self.store.lock, Image.open(self.store.path(item["filename"])) as source:
                     if size is None:
@@ -75,50 +107,21 @@ class ExportService:
                             max(2, int(source.height * scale) // 2 * 2),
                         )
                     frame = ImageOps.pad(source.convert("RGB"), size, color="black")
-                    frame.save(Path(folder) / f"{index:06d}.jpg", "JPEG", quality=90)
-            command = [
-                self.settings.ffmpeg,
-                "-nostdin",
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-framerate",
-                str(fps),
-                "-i",
-                str(Path(folder) / "%06d.jpg"),
-                "-an",
-                "-c:v",
-                "libx264",
-                "-preset",
-                "veryfast",
-                "-crf",
-                "23",
-                "-pix_fmt",
-                "yuv420p",
-                "-movflags",
-                "+faststart",
-                "-f",
-                "mp4",
-                str(partial),
-            ]
-            self.proc = subprocess.Popen(
-                command,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                creationflags=NO_WINDOW,
-            )
-            deadline = time.monotonic() + 120
-            try:
-                while self.proc.poll() is None:
-                    if self.halt.wait(0.2) or time.monotonic() > deadline:
-                        raise RuntimeError("Export cancelled or timed out")
-                    self.store.check_space()
-                if self.proc.returncode != 0:
+                    buffer = io.BytesIO()
+                    frame.save(buffer, "JPEG", quality=90)
+                payload = buffer.getvalue()
+                if self.proc.poll() is not None or self.proc.stdin.write(payload) != len(payload):
                     raise RuntimeError("Encoder failed")
-            finally:
-                terminate_process(self.proc)
-                self.proc = None
+            self.proc.stdin.close()
+            while self.proc.poll() is None:
+                if self.halt.wait(0.2) or time.monotonic() > deadline:
+                    raise RuntimeError("Export cancelled or timed out")
+                self.store.check_space()
+            if self.proc.returncode != 0:
+                raise RuntimeError("Encoder failed")
+        finally:
+            terminate_process(self.proc)
+            self.proc = None
         partial.replace(destination)
         return self.store.register(
             media_id, destination, items[0]["camera_id"], "video", "timelapse", len(items) / fps
