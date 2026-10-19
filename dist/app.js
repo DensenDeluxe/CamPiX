@@ -684,6 +684,18 @@
     ).toFixed(2);
     $("#focus-output").textContent = Number($("#focus-range").value).toFixed(1);
   }
+  let previewQueue = Promise.resolve();
+
+  function enqueuePreview(task) {
+    const run = previewQueue.then(task);
+    // Keep the chain alive after a cancelled frame so the next fetch can start,
+    // but only after this request has left the network.
+    previewQueue = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
   function stopPreview() {
     if (!s.preview) return;
     s.preview.request?.abort();
@@ -749,6 +761,18 @@
       s.preview?.generation === gen
     )
       return;
+    const camera = s.selected;
+    const preview = {
+      generation: gen,
+      camera,
+      request: null,
+      timer: null,
+      url: null,
+      pendingUrl: null,
+    };
+    // Claim this generation before clearing the video. That clear fires an
+    // error event in some browsers, and the handler must not start a second fetch.
+    s.preview = preview;
     closePeer();
     $("#live-badge").hidden = true;
     $("#live-image").removeAttribute("src");
@@ -759,15 +783,6 @@
     $("#live-video").hidden = true;
     $("#actual-transport").textContent = "JPEG";
     liveMessage("liveConnecting");
-    const camera = s.selected;
-    const preview = {
-      generation: gen,
-      request: null,
-      timer: null,
-      url: null,
-      pendingUrl: null,
-    };
-    s.preview = preview;
     const current = () => gen === s.streamGeneration && s.preview === preview;
     async function next() {
       if (!current()) return;
@@ -778,23 +793,28 @@
       let url;
       let ready = false;
       try {
-        // Request the current frame only after the preceding frame is decoded.
-        // Multipart image buffering cannot be bounded by the browser UI.
-        const response = await fetch(
-          `/api/v1/cameras/${encodeURIComponent(camera)}/preview.jpg?view=live`,
-          {
-            credentials: "same-origin",
-            cache: "no-store",
-            signal: controller.signal,
-          },
-        );
-        if (!current()) return;
-        if (response.status === 401) {
+        // One preview response is consumed before another request is allowed
+        // onto the network, including after a cancelled frame.
+        const loaded = await enqueuePreview(async () => {
+          if (!current() || controller.signal.aborted) return null;
+          const response = await fetch(
+            `/api/v1/cameras/${encodeURIComponent(camera)}/preview.jpg?view=live`,
+            {
+              credentials: "same-origin",
+              cache: "no-store",
+              signal: controller.signal,
+            },
+          );
+          const blob = await response.blob();
+          return { response, blob };
+        });
+        if (!current() || !loaded) return;
+        if (loaded.response.status === 401) {
           showLogin();
           return;
         }
-        if (!response.ok) throw new Error("Live frame unavailable");
-        url = URL.createObjectURL(await response.blob());
+        if (!loaded.response.ok) throw new Error("Live frame unavailable");
+        url = URL.createObjectURL(loaded.blob);
         preview.pendingUrl = url;
         const displayed = $("#live-image");
         displayed.src = url;
@@ -1103,6 +1123,18 @@
     );
   }
   async function startStream() {
+    const transport = $("#transport-select").value;
+    if (
+      s.user &&
+      s.view === "overview" &&
+      s.liveMode === "single" &&
+      !document.hidden &&
+      active()?.status === "online" &&
+      transport === "mjpeg" &&
+      s.preview?.camera === s.selected &&
+      s.preview.generation === s.streamGeneration
+    )
+      return;
     stopWall();
     showSingleChrome();
     stopStream();
@@ -1628,9 +1660,10 @@
     $("#live-badge").hidden = true;
     liveMessage("liveUnavailable");
   });
-  $("#live-video").addEventListener("error", () =>
-    jpegPreview(s.streamGeneration),
-  );
+  $("#live-video").addEventListener("error", () => {
+    if (s.preview || $("#transport-select").value === "mjpeg") return;
+    jpegPreview(s.streamGeneration);
+  });
   $("#fullscreen-button").addEventListener("click", (event) =>
     act(
       s.liveFullscreen ? exitLiveFullscreen : enterLiveFullscreen,
