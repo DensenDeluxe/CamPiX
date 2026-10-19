@@ -15,6 +15,7 @@ class MediaStore:
         self.db, self.settings, self.bus = db, settings, bus
         self.root = (settings.data_dir / "media").resolve()
         self.lock = threading.RLock()
+        self._reserve_notice = 0.0
 
     def path(self, filename):
         path = (self.root / filename).resolve()
@@ -30,6 +31,13 @@ class MediaStore:
 
     def check_space(self):
         if shutil.disk_usage(self.root).free < self.settings.min_free_mb * 1024 * 1024:
+            now = time.monotonic()
+            if now - self._reserve_notice >= 60:
+                self._reserve_notice = now
+                self.bus.publish(
+                    "storage.reserve",
+                    "Storage reserve reached; free space before recording",
+                )
             raise StorageError("Storage reserve reached; free space before recording")
 
     def register(self, media_id, path, camera_id, kind, trigger, duration=None):
@@ -140,3 +148,7 @@ class MediaStore:
                 continue
         self.db.execute("DELETE FROM events WHERE created<?", (cutoff,))
         self.db.execute("DELETE FROM sessions WHERE expires<?", (time.time(),))
+        self.db.execute(
+            "DELETE FROM notification_outbox WHERE status!='queued' AND id NOT IN "
+            "(SELECT id FROM notification_outbox WHERE status!='queued' ORDER BY id DESC LIMIT 200)"
+        )

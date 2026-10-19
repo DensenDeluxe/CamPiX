@@ -23,13 +23,15 @@ The familiar camera-appliance workflow should not depend on an obsolete camera s
 ## Features
 
 - **Capture adapters:** Picamera2/libcamera, Linux V4L2, Windows DirectShow webcams through FFmpeg, RTSP/HTTP network sources, and an existing local legacy JPEG preview. Independent capture workers reconnect after failures.
-- **Photos and recordings:** real JPEG snapshots and H.264/MP4 files, timed recordings, bounded pre-roll, and motion-triggered recording with renewable post-roll.
+- **Photos and recordings:** real JPEG snapshots and H.264/MP4 files, timed recordings, bounded pre-roll, and motion-triggered recording with renewable post-roll. Optional audio is a separate stream, off unless a profile enables it, and a recording is indexed only after picture and audio both finish.
+- **Motion:** a slow background model absorbs lighting changes. A 16×9 ignore mask drops permanently busy cells, and normalized regions still limit the score.
 - **Media library:** playback, authenticated downloads, locking, deletion, retention rules, storage-reserve protection, filename search across the whole library, and queued timelapse exports.
 - **Camera management:** multiple profiles and controls discovered from the selected adapter, rather than invented hardware support.
 - **Schedules:** persistent interval jobs with time windows, weekdays, and time zones.
 - **Authenticated control plane:** FastAPI, REST/OpenAPI, WebSocket events, SQLite, system metrics, Argon2id passwords, viewer/operator/admin roles, CSRF protection, and revocable sessions.
 - **Optional media server:** supervised, version-pinned MediaMTX for RTSP publishing and authenticated WebRTC/HLS access, with a latest-frame JPEG fallback.
-- **Web interface:** responsive desktop and mobile layouts, dark/light themes, English/German localization, and the supplied CamPiX branding. No frontend build or external CDN is required.
+- **Notifications:** a fixed catalog — motion, stalled capture, storage reserve, and failed export — can be delivered as a signed webhook or as local SMTP mail. No macros or custom commands.
+- **Web interface:** responsive desktop and mobile layouts, dark/light themes, English/German localization, a single live view, a JPEG wall for every camera, and the supplied CamPiX branding. No frontend build or external CDN is required.
 
 Actual application screenshot from the Chromium workflow tests, using explicit synthetic input on Windows and the English interface. This demonstrates the UI, not physical-camera qualification.
 

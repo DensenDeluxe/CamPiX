@@ -7,6 +7,8 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
+SCHEMA_VERSION = 3
+
 
 class Database:
     def __init__(self, path: Path):
@@ -15,7 +17,7 @@ class Database:
         self.lock = threading.RLock()
         self.conn = sqlite3.connect(str(path), check_same_thread=False, timeout=15)
         self.conn.row_factory = sqlite3.Row
-        if self.conn.execute("PRAGMA user_version").fetchone()[0] > 2:
+        if self.conn.execute("PRAGMA user_version").fetchone()[0] > SCHEMA_VERSION:
             self.conn.close()
             raise RuntimeError(
                 "Database schema is newer than this CamPiX release; downgrade refused"
@@ -47,7 +49,15 @@ class Database:
           CREATE TABLE IF NOT EXISTS export_jobs (
             id TEXT PRIMARY KEY, status TEXT NOT NULL, created REAL NOT NULL,
             media_id TEXT, error TEXT);
-          PRAGMA user_version=2;
+          CREATE TABLE IF NOT EXISTS notification_outbox (
+            id INTEGER PRIMARY KEY, event_id INTEGER NOT NULL, created REAL NOT NULL,
+            kind TEXT NOT NULL, camera_id TEXT, message TEXT NOT NULL,
+            channel TEXT NOT NULL CHECK(channel IN ('webhook','mail')),
+            status TEXT NOT NULL CHECK(status IN ('queued','delivered','failed')),
+            attempts INTEGER NOT NULL DEFAULT 0, next_attempt REAL NOT NULL,
+            last_error TEXT NOT NULL DEFAULT '');
+          CREATE INDEX IF NOT EXISTS notification_due ON notification_outbox(status, next_attempt);
+          PRAGMA user_version=3;
         """)
         path.chmod(0o600)
 

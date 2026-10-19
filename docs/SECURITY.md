@@ -17,7 +17,7 @@ CamPiX does not replace a hardened operating system. Administrators define camer
 - A Content Security Policy without inline JavaScript/CSS, framing restrictions, `nosniff`, a restrictive referrer policy, and secure cookies/HSTS in the TLS profile. Forwarded headers are accepted only from explicitly trusted loopback proxies.
 - Parameterized SQL, normalized media paths, no shell execution of camera sources or macros, no arbitrary GStreamer pipelines, fixed media-proxy targets, and restricted protocol paths.
 - Media proxy responses are limited to 8 MiB for HLS and 64 KiB for WHEP, with a 20-second total upstream deadline. WHEP session locations must match the same restricted session paths accepted for subsequent requests.
-- Private data files and secrets excluded from configuration exports. Network-source credentials still necessarily exist in the private database and local FFmpeg decoder process arguments.
+- Private data files and secrets excluded from configuration exports. Network-source credentials still necessarily exist in the private database and local FFmpeg decoder process arguments. Notification signing secrets and webhook URLs are also omitted from configuration export. The webhook client does not follow redirects and rejects link-local, metadata, and unspecified addresses. Local mail is restricted to SMTP on `127.0.0.1`. Audio device names are validated before they become one FFmpeg argument; a name cannot add a second input.
 - One active service per data directory, child-process cleanup on shutdown, bounded recording/pre-roll/export/event queues, and a storage reserve.
 
 ## Trust boundaries and remaining hardening

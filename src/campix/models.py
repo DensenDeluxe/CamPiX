@@ -23,6 +23,50 @@ def directshow_source_valid(source: str) -> bool:
     return bool(re.fullmatch(r'[^\x00-\x1f\x7f":]{1,256}', source)) and source == source.strip()
 
 
+def motion_mask_valid(value: str) -> str:
+    """A 16×9 ignore mask. 1 skips a cell. An empty mask analyzes the whole frame."""
+    if value == "":
+        return value
+    if len(value) != 144 or any(cell not in "01" for cell in value):
+        raise ValueError("Motion mask must be empty or 144 characters of 0 and 1")
+    if set(value) == {"1"}:
+        raise ValueError("Motion mask must leave at least one cell active")
+    if set(value) == {"0"}:
+        return ""
+    return value
+
+
+def audio_source_valid(backend: str, source: str, enabled: bool) -> None:
+    """Reject any audio name that could add a second FFmpeg input. Empty means off."""
+    if backend in {"legacy", "gstreamer"}:
+        if enabled or source:
+            raise ValueError("This camera backend has no separate audio stream")
+        return
+    if backend == "synthetic":
+        if source:
+            raise ValueError("Synthetic audio uses the generated stream and accepts no device")
+        return
+    if backend == "network":
+        if source:
+            raise ValueError("Network audio uses the camera URL and accepts no separate device")
+        return
+    if not enabled and source == "":
+        return
+    if backend == "dshow":
+        if not directshow_source_valid(source):
+            raise ValueError(
+                "DirectShow audio source must be a device name without quotes, colons, or control characters"
+            )
+        return
+    if backend in {"v4l2", "picamera2"}:
+        if not re.fullmatch(
+            r"(?:default|hw:\d{1,2}(?:,\d{1,2})?|plughw:\d{1,2}(?:,\d{1,2})?)", source
+        ):
+            raise ValueError("ALSA audio source must be default, hw:N, or plughw:N,M")
+        return
+    raise ValueError("This camera backend has no separate audio stream")
+
+
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
@@ -53,6 +97,9 @@ class CameraConfig(StrictModel):
     motion_frames: int = Field(3, ge=1, le=30)
     motion_postroll: int = Field(10, ge=1, le=300)
     motion_regions: list[MotionRegion] = Field(default_factory=list, max_length=8)
+    motion_mask: str = ""
+    audio_enabled: bool = False
+    audio_source: str = Field("", max_length=256)
     encoder: EncoderName = "auto"
     controls: dict[str, float | int | bool] = Field(default_factory=dict, max_length=32)
 
@@ -77,6 +124,8 @@ class CameraConfig(StrictModel):
         for region in self.motion_regions:
             if region.x + region.w > 1 or region.y + region.h > 1:
                 raise ValueError("Motion region must stay inside the frame")
+        self.motion_mask = motion_mask_valid(self.motion_mask)
+        audio_source_valid(self.backend, self.audio_source, self.audio_enabled)
         if self.backend == "legacy":
             from pathlib import Path
 
@@ -111,6 +160,9 @@ class CameraPatch(StrictModel):
     preroll_seconds: int | None = Field(None, ge=0, le=10)
     encoder: EncoderName | None = None
     motion_regions: list[MotionRegion] | None = Field(None, max_length=8)
+    motion_mask: str | None = None
+    audio_enabled: bool | None = None
+    audio_source: str | None = Field(None, max_length=256)
 
 
 class UserCreate(StrictModel):

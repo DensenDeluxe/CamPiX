@@ -2743,6 +2743,92 @@ button:disabled {
 [data-theme="light"] .toast {
   background: #fff;
 }
+.live-layout-toggle {
+  display: inline-flex;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.live-layout-toggle button {
+  margin: 0;
+  padding: 6px 10px;
+  color: var(--muted);
+  font: inherit;
+  font-size: 11px;
+  background: transparent;
+  border: 0;
+}
+.live-layout-toggle button[aria-pressed="true"] {
+  color: var(--text);
+  background: rgba(7, 223, 241, 0.12);
+}
+.wall-note {
+  margin: 10px 16px 0;
+}
+.camera-wall {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+  padding: 12px;
+}
+.wall-tile {
+  display: grid;
+  gap: 6px;
+  padding: 8px;
+  color: inherit;
+  text-align: left;
+  background: #061323;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+.wall-tile img {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+  background: #020910;
+}
+.wall-tile strong,
+.wall-tile small {
+  display: block;
+}
+.wall-tile small {
+  color: var(--muted);
+}
+.motion-mask {
+  display: grid;
+  grid-template-columns: repeat(16, minmax(0, 1fr));
+  gap: 2px;
+  width: min(100%, 440px);
+  margin: 8px 20px 12px;
+}
+.mask-cell {
+  aspect-ratio: 1;
+  padding: 0;
+  cursor: pointer;
+  background: rgba(7, 223, 241, 0.2);
+  border: 1px solid var(--line);
+  border-radius: 2px;
+}
+.mask-cell[aria-pressed="true"] {
+  background: rgba(255, 255, 255, 0.08);
+}
+.notification-actions {
+  margin: 0 20px 8px;
+}
+.delivery-list {
+  margin: 0 20px 16px;
+  padding: 0;
+  list-style: none;
+  color: var(--muted);
+  font-size: 12px;
+}
+.delivery-list li {
+  padding: 6px 0;
+  border-top: 1px solid var(--line);
+}
+[data-theme="light"] .wall-tile {
+  background: #f4f7fb;
+}
 @media (max-width: 760px) {
   .camera-picker {
     width: 100%;
@@ -2761,6 +2847,15 @@ button:disabled {
   .panel-header-actions select {
     flex: 1;
     max-width: none;
+  }
+  .camera-wall {
+    grid-template-columns: 1fr;
+  }
+  .live-layout-toggle {
+    flex: 1;
+  }
+  .live-layout-toggle button {
+    flex: 1;
   }
   .schedule-rule {
     flex-wrap: wrap;

@@ -900,3 +900,63 @@ test("optional MediaMTX delivers real WebRTC video and authenticated HLS", async
     .toBeNull();
   await page.locator(".nav-item[data-view=media]").click();
 });
+
+test("camera wall shows one JPEG per camera and settings keep mask and notifications", async ({
+  page,
+}) => {
+  await signin(page);
+  await page.locator("[data-add-camera]").first().click();
+  await page.locator("#new-camera-backend").selectOption("synthetic");
+  await page.locator("#new-camera-source").fill("1");
+  await page.locator("#camera-form [name=name]").fill("Second");
+  await page.locator("#camera-form .full-button").click();
+  await expect(page.locator("#camera-count")).toHaveText("2 / 2");
+  await page.locator("#live-wall").click();
+  await expect(page.locator("#camera-wall")).toBeVisible();
+  await expect(page.locator("#live-stage")).toBeHidden();
+  await expect(page.locator("#transport-select")).toBeHidden();
+  await expect(page.locator(".wall-tile")).toHaveCount(2);
+  for (const image of await page.locator(".wall-tile img").all()) {
+    await expect
+      .poll(() => image.evaluate((node) => node.naturalWidth))
+      .toBeGreaterThan(0);
+  }
+  await expect(page.locator("#live-video")).toBeHidden();
+  await page.screenshot({ path: "test-results/camera-wall.png" });
+  await page.locator(".wall-tile").first().click();
+  await expect(page.locator("#live-stage")).toBeVisible();
+  await expect(page.locator("#live-image")).toBeVisible();
+  await page.locator(".nav-item[data-view=settings]").click();
+  await page.locator("#motion-mask [role=button]").first().click();
+  await page.locator("#setting-motion").check();
+  await page.locator("#camera-settings-form button").click();
+  await expect(page.locator("#toast")).toContainText("Gespeichert");
+  await page.reload();
+  await expect(page.locator("#workspace")).toBeVisible();
+  await page.locator(".nav-item[data-view=settings]").click();
+  await expect(
+    page.locator("#motion-mask [role=button]").first(),
+  ).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator("#setting-motion")).toBeChecked();
+  await page
+    .locator("#setting-webhook-url")
+    .fill("http://127.0.0.1:9/campix-hook");
+  await page.locator("#setting-webhook").check();
+  await page
+    .locator("#notification-settings-form .panel-header button")
+    .click();
+  await expect(page.locator("#setting-webhook-secret")).not.toHaveValue("");
+  const secret = await page.locator("#setting-webhook-secret").inputValue();
+  const exported = await page.evaluate(async () => {
+    const response = await fetch("/api/v1/export");
+    return response.text();
+  });
+  expect(exported).not.toContain(secret);
+  expect(exported).not.toContain("campix-hook");
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.locator("#mobile-menu").click();
+  await page.locator(".nav-item[data-view=overview]").click();
+  await page.locator("#live-wall").click();
+  await expect(page.locator(".wall-tile")).toHaveCount(2);
+  await expect(page.locator("#live-stage")).toBeHidden();
+});

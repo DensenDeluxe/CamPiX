@@ -190,6 +190,28 @@
                     ><select id="camera-select" aria-label="Camera"></select
                   ></label>
                   <div class="panel-header-actions">
+                    <div
+                      class="live-layout-toggle"
+                      role="group"
+                      aria-label="Live layout"
+                    >
+                      <button
+                        type="button"
+                        id="live-single"
+                        aria-pressed="true"
+                        data-i18n="singleView"
+                      >
+                        Einzelansicht
+                      </button>
+                      <button
+                        type="button"
+                        id="live-wall"
+                        aria-pressed="false"
+                        data-i18n="wallView"
+                      >
+                        Alle Kameras
+                      </button>
+                    </div>
                     <select id="transport-select" aria-label="Transport">
                       <option value="auto" data-i18n="autoLive">
                         WebRTC → JPEG · Live
@@ -256,6 +278,18 @@
                     <span data-i18n="exitFullscreen">Vollbild beenden</span>
                   </button>
                 </div>
+                <p id="wall-note" class="control-note wall-note" hidden>
+                  <span data-i18n="wallHint"
+                    >Jede Kachel zeigt das aktuelle JPEG. WebRTC bleibt der
+                    Einzelansicht vorbehalten.</span
+                  >
+                </p>
+                <div
+                  id="camera-wall"
+                  class="camera-wall"
+                  hidden
+                  aria-live="polite"
+                ></div>
                 <div class="live-toolbar">
                   <div class="toolbar-stats">
                     <span id="actual-fps"></span
@@ -265,6 +299,14 @@
                   </div>
                   <div class="toolbar-actions">
                     <button
+                      class="button ghost"
+                      id="audio-toggle"
+                      type="button"
+                      hidden
+                      aria-pressed="false"
+                    >
+                      Ton abspielen</button
+                    ><button
                       class="button ghost"
                       data-capture
                       data-operator
@@ -579,7 +621,39 @@
                       data-i18n="motion"
                       >Bewegungserkennung</span
                     ></label
-                  >
+                  ><label class="checkbox-label"
+                    ><input id="setting-audio" type="checkbox" /><span
+                      data-i18n="audio"
+                      >Ton</span
+                    ></label
+                  ><label id="audio-source-field"
+                    ><span data-i18n="audioSource">Audioquelle</span
+                    ><input
+                      id="setting-audio-source"
+                      maxlength="256"
+                      autocomplete="off"
+                  /></label>
+                </div>
+                <div id="motion-mask-block">
+                  <p class="control-note" data-i18n="motionMask">
+                    Ignorierte Zellen
+                  </p>
+                  <div
+                    id="motion-mask"
+                    class="motion-mask"
+                    role="group"
+                    aria-label="Motion ignore mask"
+                  ></div>
+                  <p class="control-note" data-i18n="motionMaskHint">
+                    Helle Zellen werden ausgewertet. Dunkle Zellen ignoriert die
+                    Erkennung, zum Beispiel Bäume oder eine Uhr. Ein langsames
+                    Hintergrundmodell gleicht Lichtwechsel aus.
+                  </p>
+                  <p class="control-note" id="audio-note" data-i18n="audioHint">
+                    Ton ist standardmäßig aus und ein eigener Stream. Die
+                    Aufnahme wird erst gespeichert, wenn Bild und Ton
+                    abgeschlossen sind.
+                  </p>
                 </div>
               </form>
               <form class="panel settings-form" id="storage-settings-form">
@@ -611,6 +685,82 @@
                   Stündliche Bereinigung entfernt abgelaufene, ungesperrte
                   Medien. Gesperrte Medien bleiben erhalten.
                 </p>
+              </form>
+              <form class="panel settings-form" id="notification-settings-form">
+                <div class="panel-header">
+                  <h3 data-i18n="notifications">Benachrichtigungen</h3>
+                  <button class="button primary" data-i18n="save">
+                    Speichern
+                  </button>
+                </div>
+                <div class="form-grid">
+                  <label class="checkbox-label"
+                    ><input id="setting-webhook" type="checkbox" /><span
+                      data-i18n="webhook"
+                      >Signierter Webhook</span
+                    ></label
+                  ><label
+                    ><span data-i18n="webhookUrl">Webhook-URL</span
+                    ><input
+                      id="setting-webhook-url"
+                      type="url"
+                      maxlength="2048"
+                      autocomplete="off"
+                      spellcheck="false" /></label
+                  ><label class="checkbox-label"
+                    ><input id="setting-mail" type="checkbox" /><span
+                      data-i18n="localMail"
+                      >Lokale Mail</span
+                    ></label
+                  ><label
+                    ><span data-i18n="mailRecipient">Empfänger</span
+                    ><input
+                      id="setting-mail-recipient"
+                      maxlength="320"
+                      autocomplete="off" /></label
+                  ><label
+                    ><span data-i18n="mailPort">SMTP-Port auf 127.0.0.1</span
+                    ><input
+                      id="setting-mail-port"
+                      type="number"
+                      min="1"
+                      max="65535"
+                      value="25" /></label
+                  ><label
+                    ><span data-i18n="signingSecret">Signaturgeheimnis</span
+                    ><input
+                      id="setting-webhook-secret"
+                      type="password"
+                      readonly
+                      autocomplete="off"
+                  /></label>
+                </div>
+                <div class="toolbar-actions notification-actions">
+                  <button
+                    class="button ghost"
+                    id="reveal-secret"
+                    type="button"
+                    data-i18n="revealSecret"
+                  >
+                    Geheimnis anzeigen
+                  </button>
+                  <button
+                    class="button ghost"
+                    id="rotate-secret"
+                    type="button"
+                    data-i18n="rotateSecret"
+                  >
+                    Geheimnis erneuern
+                  </button>
+                </div>
+                <p class="control-note" data-i18n="notificationHint">
+                  Nur Bewegung, ein blockierter Kamerastream, die
+                  Speicherreserve und ein fehlgeschlagener Export werden
+                  zugestellt. Der Webhook ist HTTPS, außer auf dem Loopback.
+                  Mail geht nur an den lokalen SMTP-Dienst. Es gibt keine
+                  Befehle und keine Makros.
+                </p>
+                <ul id="notification-deliveries" class="delivery-list"></ul>
               </form>
               <article class="panel users-panel">
                 <div class="panel-header">
