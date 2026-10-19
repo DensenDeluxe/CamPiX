@@ -14,7 +14,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, 
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import Field
+from pydantic import Field, ValidationError
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from . import __version__
@@ -36,6 +36,7 @@ from .models import (
     TimelapseRequest,
     UserCreate,
 )
+from .notify import MailChannel, NotificationService, NotificationSettings, WebhookChannel
 from .process_lock import ProcessLock
 from .runtime import CameraManager
 from .scheduler import Scheduler
@@ -106,7 +107,9 @@ def create_app(settings: Settings | None = None):
     media_plane = MediaPlane(settings, cameras, bus)
     telemetry = Telemetry(settings)
     preview_slots = StreamSlots()
+    audio_slots = StreamSlots(limit=2)
     exports = ExportService(db, store, settings, bus)
+    notifications = NotificationService(db, bus)
     process_lock = ProcessLock(settings.data_dir)
     saved_storage = db.setting("storage")
     if saved_storage:
@@ -124,6 +127,7 @@ def create_app(settings: Settings | None = None):
         bus.start()
         try:
             store.reconcile()
+            notifications.start()
             cameras.start()
             scheduler.start()
             media_plane.start()
@@ -135,6 +139,7 @@ def create_app(settings: Settings | None = None):
             await asyncio.to_thread(exports.stop)
             await asyncio.to_thread(media_plane.stop)
             await asyncio.to_thread(cameras.stop)
+            await asyncio.to_thread(notifications.stop)
             db.close()
             process_lock.close()
 
@@ -156,6 +161,7 @@ def create_app(settings: Settings | None = None):
         "scheduler": scheduler,
         "media_plane": media_plane,
         "exports": exports,
+        "notifications": notifications,
     }.items():
         setattr(app.state, name, value)
 
@@ -238,6 +244,7 @@ def create_app(settings: Settings | None = None):
         "schedule_id",
         "protocol",
         "view",
+        "after",
         "x",
         "y",
         "w",
@@ -256,6 +263,9 @@ def create_app(settings: Settings | None = None):
             MediaLock,
             UserPatch,
             StorageSettings,
+            NotificationSettings,
+            WebhookChannel,
+            MailChannel,
         )
         for field in model.model_fields
     }
@@ -273,6 +283,15 @@ def create_app(settings: Settings | None = None):
             "days must contain distinct weekday numbers 0–6",
             "Unknown IANA timezone",
             "Motion region must stay inside the frame",
+            "Motion mask must be empty or 144 characters of 0 and 1",
+            "Motion mask must leave at least one cell active",
+            "Synthetic audio uses the generated stream and accepts no device",
+            "Network audio uses the camera URL and accepts no separate device",
+            "This camera backend has no separate audio stream",
+            "DirectShow audio source must be a device name without quotes, colons, or control characters",
+            "ALSA audio source must be default, hw:N, or plughw:N,M",
+            "Webhook URL is not allowed",
+            "Mail recipient is not allowed",
         )
     }
 
@@ -472,7 +491,11 @@ def create_app(settings: Settings | None = None):
     @app.patch("/api/v1/cameras/{camera_id}", dependencies=[Depends(admin)])
     def patch_camera(camera_id: str, payload: CameraPatch):
         previous = cameras.get(camera_id).config.model_dump()
-        return cameras.save(CameraConfig(**{**previous, **payload.model_dump(exclude_none=True)}))
+        try:
+            config = CameraConfig(**{**previous, **payload.model_dump(exclude_none=True)})
+        except ValidationError as exc:
+            raise RequestValidationError(exc.errors()) from exc
+        return cameras.save(config)
 
     @app.patch("/api/v1/cameras/{camera_id}/controls", dependencies=[Depends(operator)])
     def controls(camera_id: str, payload: ControlPatch):
@@ -529,6 +552,23 @@ def create_app(settings: Settings | None = None):
                 )
         finally:
             preview_slots.release(camera_id)
+
+    @app.get("/api/v1/cameras/{camera_id}/audio.wav", dependencies=[Depends(viewer)])
+    def audio(camera_id: str, after: int = Query(0, ge=0, le=2_147_483_647)):
+        if not audio_slots.acquire(camera_id):
+            raise HTTPException(429, "Too many audio readers", headers={"Retry-After": "1"})
+        try:
+            camera = cameras.get(camera_id)
+            if not camera.config.audio_enabled:
+                raise CaptureError("Audio is off for this camera")
+            sequence, payload = camera.audio_wav(after)
+            return Response(
+                payload,
+                media_type="audio/wav",
+                headers={"X-Audio-Sequence": str(sequence)},
+            )
+        finally:
+            audio_slots.release(camera_id)
 
     @app.get("/api/v1/cameras/{camera_id}/stream.mjpg", dependencies=[Depends(viewer)])
     def stream(camera_id: str, request: Request):
@@ -631,6 +671,25 @@ def create_app(settings: Settings | None = None):
         settings.retention_days, settings.min_free_mb = payload.retention_days, payload.min_free_mb
         bus.publish("settings.saved", "Storage settings saved")
         return read_settings()
+
+    @app.get("/api/v1/notifications", dependencies=[Depends(admin)])
+    def read_notifications():
+        return notifications.state()
+
+    @app.patch("/api/v1/notifications", dependencies=[Depends(admin)])
+    def update_notifications(payload: NotificationSettings):
+        try:
+            notifications.update(payload)
+        except ValueError as exc:
+            raise HTTPException(422, "Webhook address is not allowed") from exc
+        bus.publish("settings.saved", "Notification settings saved")
+        return notifications.state()
+
+    @app.post("/api/v1/notifications/secret", dependencies=[Depends(admin)])
+    def rotate_notification_secret():
+        secret = notifications.rotate_secret()
+        bus.publish("settings.saved", "Notification signing secret rotated")
+        return {"secret": secret}
 
     @app.get("/api/v1/export", dependencies=[Depends(admin)])
     def export():

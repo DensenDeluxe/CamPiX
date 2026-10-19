@@ -17,7 +17,9 @@ campixd (one process per data directory)
    │    ├── DirectShow: isolated FFmpeg device input on Windows
    │    ├── Network: isolated FFmpeg decoder, RTSP/HTTP(S)
    │    └── Legacy: existing local JPEG preview (not an MMAL/FIFO driver)
-   ├── Per camera: motion worker → event → recording / renewed post-roll
+   ├── Per camera: motion worker → slow background, ignore mask → event → recording
+   ├── Per camera: optional separate audio capture, off unless the profile enables it
+   ├── Notification worker: fixed event catalog → signed webhook or local SMTP
    ├── Per camera: native H.264 or shared FFmpeg encoder → bounded packet hub
    │    ├── Recording subscriber → timestamped TS → copy remux → finalized MP4
    │    └── Live subscriber → timestamped TS → copy remux → MediaMTX
@@ -34,13 +36,13 @@ DirectShow has a separate raw-JPEG pipe reader and one pending complete frame. I
 
 The shared JPEG encoder assigns each output access unit its actual input receipt timestamp. Picamera2 supplies relative encoder timestamps anchored to the local monotonic clock; UVC copy capture carries the original FFmpeg PTS through a bounded MPEG-TS demuxer and anchors its relative clock locally. Neither anchor proves sensor-to-screen latency. A bounded MPEG-TS mux preserves those intervals, keyframe-aligned pre-roll and clock gaps when publishing or recording with stream copy. Slow source delivery no longer shortens a recording to the requested encoder-header rate. Timelapse retains its explicitly requested frame-count timing. Reordered B frames and changing decoder configuration are rejected; codec restarts create a new epoch and terminate recordings rather than joining incompatible streams.
 
-Motion analysis retains the last analyzed image between polls, including when capture delivers fewer than five frames per second. Recording workers check encoder exit even when no new frames arrive, so an encoder failure reaches a terminal error instead of leaving an idle recording active.
+Motion analysis keeps a slow background between polls, including when capture delivers fewer than five frames per second. Each score removes one global luminance offset before comparing pixels, so a full-frame exposure or IR change is not motion. Changed pixels are held back from that background; stable pixels adapt. A fixed 16×9 mask marks cells to ignore, and the existing normalized regions still limit the score. The background is rebuilt when the mask, regions, or pixel delta change, and it is not stored. Recording workers check encoder exit even when no new frames arrive, so an encoder failure reaches a terminal error instead of leaving an idle recording active.
 
 Profile replacement and removal wait for the old camera workers to stop. If a driver remains blocked after the shutdown timeout, the API reports a conflict and retains the profile and worker ownership; retry once the driver releases the device. Control changes and profile updates share the manager lock so an old control operation cannot overwrite a newer saved profile. A frame returned after shutdown begins is discarded.
 
 Short-lived diagnostic processes read only available pipe bytes and enforce an output limit and deadline. An inherited pipe writer cannot keep cleanup waiting after the direct child exits. Windows discovery workers contain their native listing children so an outer discovery timeout also terminates those children.
 
-The capture worker preserves matching DirectShow/network JPEG bytes without a Pillow decode/re-encode cycle. Motion decoding/resizing runs on the latest sample in the independent analysis worker, only when motion is enabled. Up to eight normalized regions limit that score; with none set, the whole frame is scored. DirectShow negotiates reported size/rate/format combinations and copies matching native MJPEG; it does not request invented sensor rates. The JPEG parser scans incoming bytes once, retaining marker-boundary overlap rather than repeatedly scanning a growing frame.
+The capture worker preserves matching DirectShow/network JPEG bytes without a Pillow decode/re-encode cycle. Motion decoding/resizing runs on the latest sample in the independent analysis worker, only when motion is enabled. Up to eight normalized regions limit that score; with none set, the whole frame is scored except cells set in the ignore mask. DirectShow negotiates reported size/rate/format combinations and copies matching native MJPEG; it does not request invented sensor rates. The JPEG parser scans incoming bytes once, retaining marker-boundary overlap rather than repeatedly scanning a growing frame.
 
 `auto` prefers a profile-probed FFmpeg hardware H.264 encoder and then tested software `libx264`. Allowlisted paths cover NVENC, QSV, AMF, VideoToolbox, VAAPI and V4L2 M2M. Inventory and profile preparation use bounded processes, output limits, cancellation, a finite cache and serialized probe slots. A dedicated encoder-preparation worker keeps this work outside HTTP requests and capture; JPEG remains available while preparation is pending or fails. The sole shared encoder consumes the immutable selection with centralized codec/device/pixel-format/low-delay settings; recorders and publishers copy its packets. QSV and VideoToolbox explicitly prohibit hidden software implementations. Encoder usability is distinct from physical-camera qualification; `hardware_verified` is not awarded by synthetic probes.
 
@@ -60,7 +62,13 @@ JPEG/MP4 files are written to private temporary paths and enter the media index 
 
 The media index is listed newest first and can be filtered by kind, camera, and a literal filename substring. `%`, `_`, and `\` in that substring match themselves. The library view searches the whole index; pagination does not hide older matches. The overview keeps the three newest items independent of the library page, kind, or search. A library timelapse exports every matching snapshot, at most 500, in capture order.
 
-SQLite access is protected by transactions and thread synchronization. Schema 1 migrates to schema 2; unknown newer schemas are rejected rather than downgraded. An operating-system lock prevents two active services from using the same data directory. Database backups exclude active sessions. Media files must be backed up separately.
+SQLite access is protected by transactions and thread synchronization. Schema 1 and 2 migrate to schema 3, which adds the notification outbox. Unknown newer schemas are rejected rather than downgraded. Roll back this release with a database backup taken before the migration; an older release will not open a schema 3 file. An operating-system lock prevents two active services from using the same data directory. Database backups exclude active sessions. Media files must be backed up separately.
+
+Audio is a second capture process, started only when `audio_enabled` is true. Synthetic profiles use a generated tone. DirectShow and ALSA use a validated device name as one argument. Network profiles read audio from the same camera URL with a fixed argument list. The live view can play short WAV chunks from that PCM stream. A recording that requested audio is indexed only after the video remux and the AAC mux both succeed; a failed audio take stays unindexed. Profiles with audio off do not start the process and stay video-only.
+
+The overview can show every camera as a current JPEG tile. That wall does not open WebRTC or HLS. Choosing a tile returns to the single live view.
+
+Notifications deliver only `motion.detected`, `camera.stalled`, `storage.reserve`, and `export.failed`. The payload is a fixed JSON document signed with HMAC-SHA256. The webhook is HTTPS, or HTTP to loopback, with redirects disabled and link-local or metadata addresses rejected. Mail is SMTP to `127.0.0.1` only. The signing secret and webhook URL are omitted from configuration export. There is no shell, macro, or caller-supplied command.
 
 ## Media plane and trust boundary
 

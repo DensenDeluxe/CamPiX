@@ -33,7 +33,9 @@ def manager(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("operation", ["save", "remove"])
-def test_profile_changes_refuse_a_capture_worker_that_has_not_stopped(manager, monkeypatch, operation):
+def test_profile_changes_refuse_a_capture_worker_that_has_not_stopped(
+    manager, monkeypatch, operation
+):
     entered, release = threading.Event(), threading.Event()
     opened = []
 
@@ -60,7 +62,9 @@ def test_profile_changes_refuse_a_capture_worker_that_has_not_stopped(manager, m
             else:
                 manager.remove(config.id)
         assert manager.get(config.id) is previous
-        assert json.loads(manager.db.one("SELECT config FROM cameras")["config"])["name"] == "Camera"
+        assert (
+            json.loads(manager.db.one("SELECT config FROM cameras")["config"])["name"] == "Camera"
+        )
         assert len(opened) == 1
     finally:
         release.set()
@@ -130,15 +134,19 @@ def test_controls_and_profile_changes_preserve_the_latest_configuration(manager,
     assert manager.get(config.id).config.name == "Changed"
 
 
-def test_motion_retains_the_previous_frame_when_capture_is_slower_than_analysis(manager, monkeypatch):
+def test_motion_background_survives_slow_capture_and_ignores_uniform_light(manager, monkeypatch):
     config = CameraConfig(
-        id="slow", name="Slow camera", backend="synthetic", fps=1,
-        motion_enabled=True, motion_frames=1,
+        id="slow",
+        name="Slow camera",
+        backend="synthetic",
+        fps=1,
+        motion_enabled=True,
+        motion_frames=1,
     )
     camera = runtime.Camera(config, manager.settings, None, Bus(), {"encoders": []})
     recordings = []
     monkeypatch.setattr(camera, "start_recording", lambda **kwargs: recordings.append(kwargs))
-    updates = iter([0, None, None, None, 255])
+    updates = iter([0, None, None, None, 255, "blob"])
 
     class AnalysisTicks:
         def wait(self, timeout):
@@ -146,7 +154,10 @@ def test_motion_retains_the_previous_frame_when_capture_is_slower_than_analysis(
                 value = next(updates)
             except StopIteration:
                 return True
-            if value is not None:
+            if value == "blob":
+                camera.analysis = moving_blob()
+                camera.analysis_sequence += 1
+            elif value is not None:
                 camera.analysis = encoded_frame(level=value)
                 camera.analysis_sequence += 1
             return False
@@ -157,7 +168,9 @@ def test_motion_retains_the_previous_frame_when_capture_is_slower_than_analysis(
 
 
 @pytest.mark.parametrize("age,sequence", [(2, 1), (6, 0)])
-def test_capture_age_preserves_pipe_receipt_time_after_processing(manager, monkeypatch, age, sequence):
+def test_capture_age_preserves_pipe_receipt_time_after_processing(
+    manager, monkeypatch, age, sequence
+):
     config = CameraConfig(id="aged", name="Aged frame", backend="synthetic", width=160, height=120)
     camera = runtime.Camera(config, manager.settings, None, Bus(), {"encoders": []})
 
@@ -178,6 +191,15 @@ def test_capture_age_preserves_pipe_receipt_time_after_processing(manager, monke
         assert camera.error == "Capture unavailable (CaptureError); retrying"
 
 
+def moving_blob():
+    image = Image.new("RGB", (160, 120), (0, 0, 0))
+    draw_box = Image.new("RGB", (80, 80), (255, 255, 255))
+    image.paste(draw_box, (0, 0))
+    output = io.BytesIO()
+    image.save(output, "JPEG")
+    return output.getvalue()
+
+
 def encoded_frame(size=(160, 120), level=0):
     output = io.BytesIO()
     Image.new("RGB", size, (level, level, level)).save(output, "JPEG")
@@ -186,8 +208,13 @@ def encoded_frame(size=(160, 120), level=0):
 
 def test_capture_preserves_native_jpeg_without_rgb_decode_or_reencoding(manager, monkeypatch):
     config = CameraConfig(
-        id="passthrough", name="Native JPEG", backend="dshow", source="Webcam",
-        width=160, height=120, motion_enabled=False,
+        id="passthrough",
+        name="Native JPEG",
+        backend="dshow",
+        source="Webcam",
+        width=160,
+        height=120,
+        motion_enabled=False,
     )
     camera = runtime.Camera(config, manager.settings, None, Bus(), {"encoders": []})
     jpeg = encoded_frame()
@@ -204,17 +231,27 @@ def test_capture_preserves_native_jpeg_without_rgb_decode_or_reencoding(manager,
     monkeypatch.setattr(runtime, "make_backend", lambda config, ffmpeg: backend)
     monkeypatch.setattr(camera.bus, "publish", lambda *args: camera.halt.set())
     monkeypatch.setattr(Image.Image, "load", lambda *args: pytest.fail("JPEG pixels were decoded"))
-    monkeypatch.setattr(Image.Image, "save", lambda *args, **kwargs: pytest.fail("JPEG was reencoded"))
+    monkeypatch.setattr(
+        Image.Image, "save", lambda *args, **kwargs: pytest.fail("JPEG was reencoded")
+    )
     camera._capture()
     assert camera.jpeg is jpeg
     assert camera.sequence == 1
     assert camera.analysis is None
 
 
-def test_motion_decode_does_not_block_native_capture_and_uses_a_bounded_latest_slot(manager, monkeypatch):
+def test_motion_decode_does_not_block_native_capture_and_uses_a_bounded_latest_slot(
+    manager, monkeypatch
+):
     config = CameraConfig(
-        id="isolated", name="Independent analysis", backend="dshow", source="Webcam",
-        width=160, height=120, fps=60, motion_enabled=True,
+        id="isolated",
+        name="Independent analysis",
+        backend="dshow",
+        source="Webcam",
+        width=160,
+        height=120,
+        fps=60,
+        motion_enabled=True,
     )
     camera = runtime.Camera(config, manager.settings, None, Bus(), {"encoders": []})
     jpeg = encoded_frame()
@@ -256,8 +293,12 @@ def test_motion_decode_does_not_block_native_capture_and_uses_a_bounded_latest_s
 
 def test_cancelled_native_capture_does_not_emit_a_driver_failure(manager, monkeypatch):
     config = CameraConfig(
-        id="cancelled", name="Cancelled JPEG", backend="dshow", source="Webcam",
-        width=160, height=120,
+        id="cancelled",
+        name="Cancelled JPEG",
+        backend="dshow",
+        source="Webcam",
+        width=160,
+        height=120,
     )
     camera = runtime.Camera(config, manager.settings, None, Bus(), {"encoders": []})
     entered = threading.Event()

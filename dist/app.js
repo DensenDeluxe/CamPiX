@@ -33,6 +33,13 @@
     refreshGeneration: 0,
     liveFullscreen: false,
     fullscreenGeneration: 0,
+    liveMode: "single",
+    wallGeneration: 0,
+    wallIds: "",
+    audioGeneration: 0,
+    audioPlaying: false,
+    audioContext: null,
+    notifyDirty: false,
   };
   const words = {
     signin: ["Anmelden", "Sign in"],
@@ -92,6 +99,40 @@
     brightness: ["Helligkeit", "Brightness"],
     focus: ["Linsenposition", "Lens position"],
     motion: ["Bewegungserkennung", "Motion detection"],
+    singleView: ["Einzelansicht", "Single view"],
+    wallView: ["Alle Kameras", "All cameras"],
+    wallHint: [
+      "Jede Kachel zeigt das aktuelle JPEG. WebRTC bleibt der Einzelansicht vorbehalten.",
+      "Each tile shows the current JPEG. WebRTC stays on the single view.",
+    ],
+    audio: ["Ton", "Audio"],
+    audioSource: ["Audioquelle", "Audio source"],
+    audioHint: [
+      "Ton ist standardmäßig aus und ein eigener Stream. Die Aufnahme wird erst gespeichert, wenn Bild und Ton abgeschlossen sind.",
+      "Audio is off by default and uses its own stream. A recording is saved only after picture and audio both finish.",
+    ],
+    playAudio: ["Ton abspielen", "Play audio"],
+    stopAudio: ["Ton aus", "Mute audio"],
+    motionMask: ["Ignorierte Zellen", "Ignored cells"],
+    motionMaskHint: [
+      "Helle Zellen werden ausgewertet. Dunkle Zellen ignoriert die Erkennung, zum Beispiel Bäume oder eine Uhr. Ein langsames Hintergrundmodell gleicht Lichtwechsel aus.",
+      "Bright cells are analyzed. Dark cells are ignored, for example trees or a clock. A slow background model absorbs lighting changes.",
+    ],
+    notifications: ["Benachrichtigungen", "Notifications"],
+    webhook: ["Signierter Webhook", "Signed webhook"],
+    webhookUrl: ["Webhook-URL", "Webhook URL"],
+    localMail: ["Lokale Mail", "Local mail"],
+    mailRecipient: ["Empfänger", "Recipient"],
+    mailPort: ["SMTP-Port auf 127.0.0.1", "SMTP port on 127.0.0.1"],
+    signingSecret: ["Signaturgeheimnis", "Signing secret"],
+    revealSecret: ["Geheimnis anzeigen", "Show secret"],
+    hideSecret: ["Geheimnis verbergen", "Hide secret"],
+    rotateSecret: ["Geheimnis erneuern", "Rotate secret"],
+    notificationHint: [
+      "Nur Bewegung, ein blockierter Kamerastream, die Speicherreserve und ein fehlgeschlagener Export werden zugestellt. Der Webhook ist HTTPS, außer auf dem Loopback. Mail geht nur an den lokalen SMTP-Dienst. Es gibt keine Befehle und keine Makros.",
+      "Only motion, a stalled camera, the storage reserve, and a failed export are delivered. The webhook is HTTPS except on loopback. Mail uses only the local SMTP service. There are no commands and no macros.",
+    ],
+    noDeliveries: ["Noch keine Zustellungen.", "No deliveries yet."],
     noControls: [
       "Diese Quelle bietet keine Sensor-Controls.",
       "This source exposes no sensor controls.",
@@ -350,8 +391,11 @@
       "",
       view === "overview" ? location.pathname : "#" + view,
     );
-    if (view === "overview" && !document.hidden) startStream();
-    else stopStream();
+    if (view === "overview" && !document.hidden) resumeLive();
+    else {
+      stopWall();
+      stopStream();
+    }
     if (s.user) act(refresh);
   }
   function showLogin() {
@@ -365,6 +409,9 @@
     $("#login-screen").hidden = false;
     if (s.socket) s.socket.close();
     stopStream();
+    stopWall();
+    showSingleChrome();
+    s.liveMode = "single";
     s.csrf = "";
     clearTimeout(s.searchTimer);
     $$("dialog[open]").forEach((d) => d.close());
@@ -378,7 +425,7 @@
     $("#login-form [name=password]").value = "";
     await refresh();
     connectEvents();
-    startStream();
+    resumeLive();
   }
   async function refresh() {
     if (!s.user) return;
@@ -424,10 +471,11 @@
       s.cameraDirty = s.dirtyControls = false;
     }
     render();
-    if (active()?.status !== "online") {
+    if (s.liveMode !== "wall" && active()?.status !== "online") {
       stopStream();
       $("#live-empty").hidden = false;
     }
+    syncWall();
     if (admin() && s.view === "settings") {
       const [settings, users] = await Promise.all([
         api("/settings"),
@@ -440,6 +488,21 @@
       ) {
         $("#setting-retention").value = settings.retention_days;
         $("#setting-reserve").value = settings.min_free_mb;
+      }
+      const notifications = await api("/notifications");
+      if (!s.user || generation !== s.refreshGeneration) return;
+      if (
+        !s.notifyDirty &&
+        !$("#notification-settings-form").contains(document.activeElement)
+      ) {
+        $("#setting-webhook").checked = !!notifications.webhook?.enabled;
+        $("#setting-webhook-url").value = notifications.webhook?.url || "";
+        $("#setting-mail").checked = !!notifications.mail?.enabled;
+        $("#setting-mail-recipient").value =
+          notifications.mail?.recipient || "";
+        $("#setting-mail-port").value = notifications.mail?.port || 25;
+        $("#setting-webhook-secret").value = notifications.secret || "";
+        renderDeliveries(notifications.deliveries);
       }
       renderUsers(users);
     }
@@ -602,7 +665,16 @@
       $("#setting-preroll").value = c.preroll_seconds;
       $("#setting-motion").checked = c.motion_enabled;
       $("#setting-motion-threshold").value = c.motion_threshold;
+      $("#setting-audio").checked = !!c.audio_enabled;
+      $("#setting-audio-source").value = c.audio_source || "";
+      renderMask(c.motion_mask || "");
+      const needsSource = ["dshow", "v4l2", "picamera2"].includes(c.backend);
+      $("#audio-source-field").hidden = !needsSource;
+      $("#setting-audio").disabled = ["legacy", "gstreamer"].includes(
+        c.backend,
+      );
     }
+    updateAudioButton();
   }
   function outputs() {
     $("#exposure-output").textContent =
@@ -656,6 +728,7 @@
   }
   function stopStream() {
     s.streamGeneration++;
+    stopAudio();
     stopPreview();
     $("#live-image").removeAttribute("src");
     $("#live-image").hidden = true;
@@ -761,7 +834,277 @@
     }
     next();
   }
+  function showSingleChrome() {
+    $("#camera-wall").hidden = true;
+    $("#wall-note").hidden = true;
+    $("#live-stage").hidden = false;
+    $("#transport-select").hidden = false;
+    $("#fullscreen-button").hidden = false;
+    $("#live-single").setAttribute("aria-pressed", "true");
+    $("#live-wall").setAttribute("aria-pressed", "false");
+  }
+  function showWallChrome() {
+    $("#camera-wall").hidden = false;
+    $("#wall-note").hidden = false;
+    $("#live-stage").hidden = true;
+    $("#transport-select").hidden = true;
+    $("#fullscreen-button").hidden = true;
+    $("#live-badge").hidden = true;
+    $("#live-single").setAttribute("aria-pressed", "false");
+    $("#live-wall").setAttribute("aria-pressed", "true");
+  }
+  function resumeLive() {
+    if (s.liveMode === "wall") startWall();
+    else startStream();
+  }
+  function updateAudioButton() {
+    const button = $("#audio-toggle");
+    const enabled = !!active()?.audio_enabled && s.liveMode === "single";
+    button.hidden = !enabled;
+    button.textContent = t(s.audioPlaying ? "stopAudio" : "playAudio");
+    button.setAttribute("aria-pressed", s.audioPlaying ? "true" : "false");
+  }
+  function stopAudio() {
+    s.audioGeneration++;
+    s.audioPlaying = false;
+    clearTimeout(s.audioTimer);
+    if (s.audioController) s.audioController.abort();
+    s.audioController = null;
+    if (s.audioContext) {
+      s.audioContext.close().catch(() => {});
+      s.audioContext = null;
+    }
+    if ($("#audio-toggle")) updateAudioButton();
+  }
+  function startAudio() {
+    const camera = active();
+    if (!camera?.audio_enabled || s.liveMode !== "single" || !s.user) return;
+    stopAudio();
+    const gen = s.audioGeneration;
+    const context = new AudioContext();
+    s.audioContext = context;
+    s.audioPlaying = true;
+    updateAudioButton();
+    let after = 0;
+    let nextTime = 0;
+    const pump = async () => {
+      if (gen !== s.audioGeneration || !s.user) return;
+      const controller = new AbortController();
+      s.audioController = controller;
+      const timeout = setTimeout(() => controller.abort(), 2500);
+      try {
+        const response = await fetch(
+          `/api/v1/cameras/${encodeURIComponent(s.selected)}/audio.wav?after=${after}`,
+          {
+            credentials: "same-origin",
+            cache: "no-store",
+            signal: controller.signal,
+          },
+        );
+        if (response.status === 401) {
+          showLogin();
+          return;
+        }
+        if (!response.ok) throw new Error("audio");
+        const sequence = Number(response.headers.get("X-Audio-Sequence"));
+        const payload = await response.arrayBuffer();
+        if (gen !== s.audioGeneration) return;
+        const decoded = await context.decodeAudioData(payload.slice(0));
+        const node = context.createBufferSource();
+        node.buffer = decoded;
+        node.connect(context.destination);
+        const startAt = Math.max(context.currentTime + 0.05, nextTime);
+        node.start(startAt);
+        nextTime = startAt + decoded.duration;
+        after = Number.isFinite(sequence) ? sequence : after;
+      } catch (error) {
+        if (gen !== s.audioGeneration) return;
+        if (error?.name === "AbortError") return;
+        nextTime = 0;
+      } finally {
+        clearTimeout(timeout);
+        if (gen === s.audioGeneration && s.audioPlaying) {
+          const delay = Math.max(
+            40,
+            (nextTime - context.currentTime) * 1000 - 80,
+          );
+          s.audioTimer = setTimeout(pump, Number.isFinite(delay) ? delay : 200);
+        }
+      }
+    };
+    pump();
+  }
+  function stopWall() {
+    s.wallGeneration++;
+    for (const tile of s.wallTiles || []) {
+      tile.controller?.abort();
+      if (tile.url) URL.revokeObjectURL(tile.url);
+    }
+    s.wallTiles = [];
+    s.wallIds = "";
+  }
+  function startWall() {
+    stopStream();
+    stopWall();
+    showWallChrome();
+    const gen = s.wallGeneration;
+    const wall = $("#camera-wall");
+    s.wallIds = s.cameras.map((camera) => camera.id).join("\n");
+    s.wallTiles = s.cameras.map((camera) => {
+      const button = make("button", "wall-tile");
+      button.type = "button";
+      button.dataset.camera = camera.id;
+      const image = make("img");
+      image.alt = `${camera.name} live preview`;
+      const caption = make("span", "wall-caption");
+      caption.append(
+        make("strong", "", camera.name),
+        make("small", "", camera.status),
+      );
+      button.append(image, caption);
+      button.addEventListener("click", () => {
+        s.selected = camera.id;
+        s.liveMode = "single";
+        s.cameraDirty = s.dirtyControls = false;
+        $("#camera-select").value = camera.id;
+        stopWall();
+        showSingleChrome();
+        renderCamera();
+        startStream();
+      });
+      return { id: camera.id, button, image, controller: null, url: "" };
+    });
+    wall.replaceChildren(
+      ...(s.wallTiles.length
+        ? s.wallTiles.map((tile) => tile.button)
+        : [make("p", "empty-message", t("noCamera"))]),
+    );
+    for (const tile of s.wallTiles) pumpWall(gen, tile);
+    updateAudioButton();
+  }
+  async function pumpWall(gen, tile) {
+    while (
+      gen === s.wallGeneration &&
+      s.user &&
+      s.view === "overview" &&
+      s.liveMode === "wall" &&
+      !document.hidden
+    ) {
+      const started = performance.now();
+      const controller = new AbortController();
+      tile.controller = controller;
+      const timeout = setTimeout(() => controller.abort(), 2500);
+      let nextUrl = "";
+      try {
+        const response = await fetch(
+          `/api/v1/cameras/${encodeURIComponent(tile.id)}/preview.jpg?view=live`,
+          {
+            credentials: "same-origin",
+            cache: "no-store",
+            signal: controller.signal,
+          },
+        );
+        if (gen !== s.wallGeneration) return;
+        if (response.status === 401) {
+          showLogin();
+          return;
+        }
+        if (!response.ok) throw new Error("preview");
+        const blob = await response.blob();
+        if (gen !== s.wallGeneration) return;
+        nextUrl = URL.createObjectURL(blob);
+        tile.image.src = nextUrl;
+        await tile.image.decode();
+        if (gen !== s.wallGeneration) return;
+        if (tile.url) URL.revokeObjectURL(tile.url);
+        tile.url = nextUrl;
+        nextUrl = "";
+      } catch (error) {
+        if (gen !== s.wallGeneration || error?.name === "AbortError") return;
+      } finally {
+        clearTimeout(timeout);
+        if (nextUrl) URL.revokeObjectURL(nextUrl);
+        tile.controller = null;
+      }
+      if (gen !== s.wallGeneration) return;
+      const camera = s.cameras.find((item) => item.id === tile.id);
+      const interval =
+        1000 / Math.max(1, Math.min(15, camera?.fps_target || 5));
+      await new Promise((resolve) =>
+        setTimeout(
+          resolve,
+          Math.max(0, interval - (performance.now() - started)),
+        ),
+      );
+    }
+  }
+  function syncWall() {
+    if (s.liveMode !== "wall" || s.view !== "overview") return;
+    const ids = s.cameras.map((camera) => camera.id).join("\n");
+    if (ids !== s.wallIds) {
+      startWall();
+      return;
+    }
+    for (const tile of s.wallTiles || []) {
+      const camera = s.cameras.find((item) => item.id === tile.id);
+      const status = tile.button.querySelector("small");
+      if (camera && status) status.textContent = camera.status;
+    }
+  }
+  function renderMask(value) {
+    const mask = $("#motion-mask");
+    mask.setAttribute("aria-label", t("motionMask"));
+    const cells = value && value.length === 144 ? value : "0".repeat(144);
+    mask.replaceChildren(
+      ...[...cells].map((cell, index) => {
+        const cellButton = make("div", "mask-cell");
+        cellButton.role = "button";
+        cellButton.tabIndex = 0;
+        cellButton.setAttribute(
+          "aria-pressed",
+          cell === "1" ? "true" : "false",
+        );
+        const toggle = () => {
+          const ignored = cellButton.getAttribute("aria-pressed") === "true";
+          cellButton.setAttribute("aria-pressed", ignored ? "false" : "true");
+          s.cameraDirty = true;
+        };
+        cellButton.addEventListener("click", toggle);
+        cellButton.addEventListener("keydown", (event) => {
+          if (event.key !== "Enter" && event.key !== " ") return;
+          event.preventDefault();
+          toggle();
+        });
+        cellButton.dataset.index = String(index);
+        return cellButton;
+      }),
+    );
+  }
+  function maskValue() {
+    const cells = [...$("#motion-mask").children].map((button) =>
+      button.getAttribute("aria-pressed") === "true" ? "1" : "0",
+    );
+    return cells.includes("1") ? cells.join("") : "";
+  }
+  function renderDeliveries(items) {
+    const list = $("#notification-deliveries");
+    if (!items?.length) {
+      list.replaceChildren(make("li", "", t("noDeliveries")));
+      return;
+    }
+    list.replaceChildren(
+      ...items.map((item) =>
+        make(
+          "li",
+          "",
+          `${item.kind} · ${item.channel} · ${item.status}${item.last_error ? " · " + item.last_error : ""}`,
+        ),
+      ),
+    );
+  }
   async function startStream() {
+    stopWall();
+    showSingleChrome();
     stopStream();
     const gen = s.streamGeneration;
     if (
@@ -1102,6 +1445,11 @@
           ["Skipped capture frames", c.capture_dropped_frames],
           ["Test status", c.capabilities.test_status || "unverified"],
           ["Motion", t(c.motion_enabled ? "enabled" : "disabled")],
+          ["Motion mask", c.motion_mask ? "ignored cells" : "—"],
+          [
+            "Audio",
+            c.audio_enabled ? c.audio_status || t("enabled") : t("disabled"),
+          ],
           ["Dropped recording frames", c.dropped_frames],
         ])
           details.append(make("dt", "", k), make("dd", "", String(v)));
@@ -1118,7 +1466,7 @@
               if (!confirm(t("confirmDelete"))) return;
               await api(`/cameras/${c.id}`, "DELETE");
               await refresh();
-              startStream();
+              resumeLive();
             }, remove),
           );
           card.append(remove);
@@ -1181,6 +1529,7 @@
           act(async () => {
             await refresh();
             if (
+              s.liveMode === "single" &&
               (message.kind === "camera.online" ||
                 (message.kind === "stream.ready" &&
                   $("#transport-select").value === "auto")) &&
@@ -1233,7 +1582,7 @@
   $("#refresh-button").addEventListener("click", (e) =>
     act(async () => {
       await refresh();
-      if (s.view === "overview") startStream();
+      if (s.view === "overview") resumeLive();
     }, e.currentTarget),
   );
   $("#theme-toggle").addEventListener("click", () => {
@@ -1246,13 +1595,32 @@
     s.lang = s.lang === "de" ? "en" : "de";
     localStorage.setItem("campix-language", s.lang);
     translate();
+    updateAudioButton();
+    $("#motion-mask").setAttribute("aria-label", t("motionMask"));
+    $("#live-layout-toggle")?.setAttribute("aria-label", t("singleView"));
   });
   $("#camera-select").addEventListener("change", (e) => {
     s.selected = e.target.value;
     s.cameraDirty = s.dirtyControls = false;
     renderCamera();
     permissions();
+    if (s.liveMode === "single") startStream();
+  });
+  $("#live-single").addEventListener("click", () => {
+    if (s.liveMode === "single") return;
+    s.liveMode = "single";
     startStream();
+  });
+  $("#live-wall").addEventListener("click", () =>
+    act(async () => {
+      if (s.liveFullscreen) await exitLiveFullscreen();
+      s.liveMode = "wall";
+      startWall();
+    }),
+  );
+  $("#audio-toggle").addEventListener("click", () => {
+    if (s.audioPlaying) stopAudio();
+    else startAudio();
   });
   $("#transport-select").addEventListener("change", startStream);
   $("#live-image").addEventListener("error", () => {
@@ -1371,7 +1739,7 @@
       s.selected = item.id;
       toast(t("saved"));
       await refresh();
-      startStream();
+      resumeLive();
     }, e.submitter);
   });
   $("#scan-button").addEventListener("click", (e) =>
@@ -1435,6 +1803,9 @@
   $("#storage-settings-form").addEventListener("input", () => {
     s.storageDirty = true;
   });
+  $("#notification-settings-form").addEventListener("input", () => {
+    s.notifyDirty = true;
+  });
   $("#camera-settings-form").addEventListener("submit", (e) => {
     e.preventDefault();
     const [width, height] = $("#setting-resolution")
@@ -1449,6 +1820,11 @@
       preroll_seconds: Number($("#setting-preroll").value),
       motion_enabled: $("#setting-motion").checked,
       motion_threshold: Number($("#setting-motion-threshold").value),
+      motion_mask: maskValue(),
+      audio_enabled: $("#setting-audio").checked,
+      audio_source: ["dshow", "v4l2", "picamera2"].includes(active()?.backend)
+        ? $("#setting-audio-source").value
+        : "",
     };
     act(async () => {
       if (!active()) throw new Error(t("noCamera"));
@@ -1471,6 +1847,40 @@
       await refresh();
     }, e.submitter);
   });
+  $("#notification-settings-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const payload = {
+      webhook: {
+        enabled: $("#setting-webhook").checked,
+        url: $("#setting-webhook-url").value.trim(),
+      },
+      mail: {
+        enabled: $("#setting-mail").checked,
+        recipient: $("#setting-mail-recipient").value.trim(),
+        port: Number($("#setting-mail-port").value),
+      },
+    };
+    act(async () => {
+      const saved = await api("/notifications", "PATCH", payload);
+      s.notifyDirty = false;
+      $("#setting-webhook-secret").value = saved.secret || "";
+      renderDeliveries(saved.deliveries);
+      toast(t("saved"));
+    }, e.submitter);
+  });
+  $("#reveal-secret").addEventListener("click", () => {
+    const input = $("#setting-webhook-secret");
+    const reveal = input.type === "password";
+    input.type = reveal ? "text" : "password";
+    $("#reveal-secret").textContent = t(reveal ? "hideSecret" : "revealSecret");
+  });
+  $("#rotate-secret").addEventListener("click", (e) =>
+    act(async () => {
+      const saved = await api("/notifications/secret", "POST");
+      $("#setting-webhook-secret").value = saved.secret;
+      toast(t("saved"));
+    }, e.currentTarget),
+  );
   $("#export-button").addEventListener("click", (e) =>
     act(async () => {
       const config = await api("/export");
@@ -1544,7 +1954,7 @@
   );
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) stopStream();
-    else if (s.user && s.view === "overview") startStream();
+    else if (s.user && s.view === "overview") resumeLive();
   });
   setInterval(() => {
     const now = new Date();

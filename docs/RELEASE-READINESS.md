@@ -217,6 +217,17 @@ Final verification recorded **355 Python passes and two POSIX-only skips on Wind
 
 Lock consistency, Ruff 0.17.0, JavaScript syntax, documentation links, formatting and diff checks passed. The wheel matches the current Python/web source bytes and passed an isolated installed-package assets/authentication/JPEG smoke check with hash-verified runtime dependencies. That smoke emitted the existing Starlette TestClient deprecation warning. No dependencies or schema changed. No fresh `.deb`/OCI build, native Pi/macOS hardware test, long soak/disconnect qualification, publication or installed-release replacement was performed. Before source rollback, restore encoder profiles to `auto` or `libx264` so older validators can read them.
 
+## Notifications, lighting-tolerant motion, audio, and the camera wall
+
+These behaviors are part of the software candidate. They do not add a hardware qualification.
+
+- Notifications leave the service only for `motion.detected`, `camera.stalled`, `storage.reserve`, and `export.failed`. Delivery is one signed HTTPS webhook, or HTTP on loopback, or SMTP to `127.0.0.1`. Redirects are not followed. The signing secret and webhook URL stay out of configuration export.
+- Motion compares frames with a slow background after removing one global luminance offset. A 16×9 ignore mask drops selected cells. The background is memory-only.
+- Audio is off unless a camera profile enables it. It is a separate capture process. A recording that asks for audio is indexed only after the video remux and the AAC mux both succeed. The checked path uses the explicit synthetic tone.
+- The overview can show every camera as the current authenticated JPEG. That wall does not open WebRTC or HLS.
+
+Local verification on 19 October 2026: `uv run --no-sync pytest -q` recorded **606 passed and 18 skipped**. The skips are Windows-only process, discovery, and installer cases, one unconfigured Python MediaMTX integration, and the explicit NVENC hardware case. `npm test` with installed Chrome and MediaMTX v1.21.2 recorded **21 passed**, including the JPEG wall, mask persistence, notification redaction, and the existing WebRTC/HLS case. `uvx ruff check src tests scripts`, `npm run check`, `npm run check:docs`, and `npm run format:check` passed. No physical camera, soak, Raspberry Pi, public webhook, or production mail-transfer agent was exercised. Schema 3 adds the notification outbox; roll back with a database backup taken before that migration.
+
 ## Remaining production gates
 
 1. Test at least Pi 4/CM4 and Pi 5/CM5 on their target operating systems with official and relevant Arducam/third-party sensors. Qualify UVC devices and at least one RTSP camera separately. Device discovery is not full functional certification.

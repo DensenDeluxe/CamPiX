@@ -14,11 +14,13 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+from .audio import AudioCapture, AudioRecording
 from .budget import admission_reason, shed_level_for
 from .capture import CaptureError, make_backend
 from .encoded import AnnexBParser, EncodedHub, h264_dimensions
 from .encoding import EncoderSelection, EncoderUnavailable, jpeg_dimensions, select_encoder
 from .models import CameraConfig
+from .motion import BackgroundModel
 from .recording import EncodedRecorder, encoder_probe
 from .shared_encoder import SharedEncoder
 
@@ -29,9 +31,7 @@ JPEG_PREROLL_BYTES = 32 * 1024 * 1024
 def trim_jpeg_history(frames, now, seconds, hub_ready, max_bytes=JPEG_PREROLL_BYTES):
     """Keep the newest JPEG. Drop history once the encoded hub has a keyframe."""
     total = sum(len(payload) for _, payload in frames)
-    while len(frames) > 1 and (
-        hub_ready or now - frames[0][0] > seconds or total > max_bytes
-    ):
+    while len(frames) > 1 and (hub_ready or now - frames[0][0] > seconds or total > max_bytes):
         total -= len(frames.popleft()[1])
     return total
 
@@ -51,21 +51,11 @@ def downscale_jpeg(payload: bytes, max_width: int = 960, max_height: int = 540) 
         return out.getvalue()
 
 
-def motion_score(previous, gray, pixel_delta: int, regions) -> float:
-    """Fraction of changed samples. Regions are normalized and already inside the frame."""
-    changed = np.abs(gray.astype(np.int16) - previous.astype(np.int16)) > pixel_delta
-    if regions:
-        height, width = gray.shape
-        mask = np.zeros(gray.shape, dtype=bool)
-        for region in regions:
-            x0, y0 = int(region.x * width), int(region.y * height)
-            x1 = min(width, int((region.x + region.w) * width))
-            y1 = min(height, int((region.y + region.h) * height))
-            if x1 > x0 and y1 > y0:
-                mask[y0:y1, x0:x1] = True
-        if mask.any():
-            return float(np.mean(changed[mask]))
-    return float(np.mean(changed))
+def motion_score(previous, gray, pixel_delta: int, regions, cells: str = "") -> float:
+    """Fraction of changed samples. Retained for callers that compare two frames directly."""
+    from .motion import motion_score as score_frames
+
+    return score_frames(previous, gray, pixel_delta, regions, cells)
 
 
 def host_load_ratio() -> float | None:
@@ -124,6 +114,7 @@ class Camera:
         self.analysis = None
         self.analysis_sequence = 0
         self.recorder = None
+        self.audio = None
         self.capture_thread = threading.Thread(
             target=self._capture, name=f"capture-{config.id}", daemon=True
         )
@@ -135,6 +126,9 @@ class Camera:
         if self.config.enabled:
             self.capture_thread.start()
             self.motion_thread.start()
+            if self.config.audio_enabled:
+                self.audio = AudioCapture(self.config, self.settings, self.bus)
+                self.audio.start()
 
     def prepare_encoding(self, *, require_backend=False):
         self.require_encoding_backend = require_backend
@@ -476,8 +470,10 @@ class Camera:
             )
 
     def _motion(self):
-        previous, sequence, active_frames = None, 0, 0
+        sequence, active_frames = 0, 0
         last_motion = 0
+        model = BackgroundModel()
+        signature = None
         while True:
             self._refresh_shed()
             interval = 0.2 if self.shed_level < 1 else 0.5 if self.shed_level == 1 else 1
@@ -499,34 +495,47 @@ class Camera:
                 if self.config.motion_enabled and jpeg is not None and current != sequence:
                     gray = self._motion_gray(jpeg)
                     sequence = current
-                    if previous is not None:
-                        score = motion_score(
-                            previous, gray, self.config.motion_pixel_delta, self.config.motion_regions
-                        )
-                        active_frames = (
-                            active_frames + 1 if score >= self.config.motion_threshold else 0
-                        )
-                        if active_frames >= self.config.motion_frames:
-                            now = time.monotonic()
-                            if now - last_motion > 2:
-                                self.bus.publish(
-                                    "motion.detected",
-                                    "Motion detected",
-                                    self.config.id,
-                                    {"score": round(score, 4)},
+                    current_signature = (
+                        self.config.motion_pixel_delta,
+                        self.config.motion_mask,
+                        tuple(
+                            (region.x, region.y, region.w, region.h)
+                            for region in self.config.motion_regions
+                        ),
+                    )
+                    if current_signature != signature:
+                        model.reset()
+                        signature = current_signature
+                    score = model.observe(
+                        gray,
+                        self.config.motion_pixel_delta,
+                        self.config.motion_regions,
+                        self.config.motion_mask,
+                    )
+                    active_frames = (
+                        active_frames + 1 if score >= self.config.motion_threshold else 0
+                    )
+                    if active_frames >= self.config.motion_frames:
+                        now = time.monotonic()
+                        if now - last_motion > 2:
+                            self.bus.publish(
+                                "motion.detected",
+                                "Motion detected",
+                                self.config.id,
+                                {"score": round(score, 4)},
+                            )
+                        last_motion = now
+                        with self.operation_lock:
+                            if self.recorder is None:
+                                self.start_recording(
+                                    trigger="motion", duration=self.config.motion_postroll
                                 )
-                            last_motion = now
-                            with self.operation_lock:
-                                if self.recorder is None:
-                                    self.start_recording(
-                                        trigger="motion", duration=self.config.motion_postroll
-                                    )
-                                elif self.recorder.trigger == "motion":
-                                    self.recorder.deadline = now + self.config.motion_postroll
-                            active_frames = 0
-                    previous = gray
+                            elif self.recorder.trigger == "motion":
+                                self.recorder.deadline = now + self.config.motion_postroll
+                        active_frames = 0
                 elif not self.config.motion_enabled or jpeg is None:
-                    previous = None
+                    model.reset()
+                    signature = None
                     active_frames = 0
                 with self.operation_lock:
                     recorder = self.recorder
@@ -545,6 +554,11 @@ class Camera:
                     "Camera %s analysis/recording failed: %s", self.config.id, type(exc).__name__
                 )
                 self.halt.wait(2)
+
+    def audio_wav(self, after=0):
+        if not self.config.audio_enabled or self.audio is None:
+            raise CaptureError("Audio is off for this camera")
+        return self.audio.next_wav(after)
 
     def live_frame(self):
         """Small JPEG for the browser fallback. Full frame until the first preview exists."""
@@ -655,22 +669,36 @@ class Camera:
             ):
                 raise CaptureError("Shared H.264 stream is still preparing; retry shortly")
             encoder = selection.codec
-            recorder = EncodedRecorder(
-                self.config,
-                self.settings,
-                self.store,
-                self.encoded_hub,
-                trigger,
-                duration,
-                selection=selection,
-            )
+            if self.config.audio_enabled:
+                if self.audio is None or not self.audio.ready.is_set():
+                    raise CaptureError("Audio stream is not ready")
+                recorder = AudioRecording(
+                    self.config,
+                    self.settings,
+                    self.store,
+                    self.encoded_hub,
+                    self.audio,
+                    trigger,
+                    duration,
+                    selection=selection,
+                )
+            else:
+                recorder = EncodedRecorder(
+                    self.config,
+                    self.settings,
+                    self.store,
+                    self.encoded_hub,
+                    trigger,
+                    duration,
+                    selection=selection,
+                )
             with self.condition:
                 self.recorder = recorder
             self.bus.publish(
                 "recording.started",
                 "Recording started",
                 self.config.id,
-                {"trigger": trigger, "encoder": encoder},
+                {"trigger": trigger, "encoder": encoder, "audio": self.config.audio_enabled},
             )
             return {"recording": True, "media_id": recorder.media_id}
 
@@ -744,6 +772,11 @@ class Camera:
                 "recording_write_bytes": getattr(recorder, "bytes_written", 0) if recorder else 0,
                 "motion_enabled": self.config.motion_enabled,
                 "motion_threshold": self.config.motion_threshold,
+                "motion_mask": self.config.motion_mask,
+                "audio_enabled": self.config.audio_enabled,
+                "audio_source": self.config.audio_source,
+                "audio_status": self.audio.status if self.audio else "off",
+                "audio_error": self.audio.error if self.audio else None,
                 "controls": self.config.controls.copy(),
                 "capabilities": self.backend.capabilities.copy()
                 if self.backend
@@ -814,6 +847,8 @@ class Camera:
             self.capture_thread.join(timeout=10)
         if self.motion_thread.is_alive():
             self.motion_thread.join(timeout=30)
+        if self.audio:
+            self.audio.stop()
         if self.encoder_thread.is_alive():
             self.encoder_thread.join(timeout=15)
         if self.shared_encoder:
@@ -872,16 +907,21 @@ class CameraManager:
 
     def _stop_for_update(self, camera):
         camera.stop()
-        if (
-            camera.capture_thread.is_alive()
-            or camera.motion_thread.is_alive()
-            or camera.encoder_thread.is_alive()
-            or camera.shared_encoder
+        audio_alive = bool(camera.audio and camera.audio.thread.is_alive())
+        encoder_alive = bool(
+            camera.shared_encoder
             and (
                 camera.shared_encoder.thread.is_alive()
                 or camera.shared_encoder.reader_thread
                 and camera.shared_encoder.reader_thread.is_alive()
             )
+        )
+        if (
+            camera.capture_thread.is_alive()
+            or camera.motion_thread.is_alive()
+            or audio_alive
+            or camera.encoder_thread.is_alive()
+            or encoder_alive
         ):
             message = "Camera worker did not stop; retry after the driver releases the device"
             camera.status, camera.error = "error", message

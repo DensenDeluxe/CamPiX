@@ -14,7 +14,7 @@ from contextlib import closing
 from pathlib import Path
 
 from .config import Settings
-from .db import Database
+from .db import SCHEMA_VERSION, Database
 from .models import CameraConfig, UserCreate, directshow_source_valid
 from .process_lock import ProcessLock
 from .processes import NO_WINDOW, bounded_output, contain_children
@@ -384,7 +384,7 @@ def _admin_state(path: Path, username: str) -> tuple[bool, bool]:
         return False, False
     try:
         with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)) as conn:
-            if conn.execute("PRAGMA user_version").fetchone()[0] > 2:
+            if conn.execute("PRAGMA user_version").fetchone()[0] > SCHEMA_VERSION:
                 raise ProvisionError(
                     "Database schema is newer than this release; downgrade refused"
                 )

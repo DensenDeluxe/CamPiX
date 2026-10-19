@@ -82,10 +82,20 @@ class EncodedRecorder:
     startup_timeout = 6.0
 
     def __init__(
-        self, config, settings, store, hub, trigger="manual", duration=None, *, selection=None
+        self,
+        config,
+        settings,
+        store,
+        hub,
+        trigger="manual",
+        duration=None,
+        *,
+        selection=None,
+        register=True,
     ):
         self.config, self.settings, self.store, self.hub = config, settings, store, hub
         self.trigger, self.selection = trigger, selection
+        self.register = register
         self.started = time.monotonic()
         self.deadline = self.started + duration if duration else None
         self.stop_requested, self.done = threading.Event(), threading.Event()
@@ -221,9 +231,13 @@ class EncodedRecorder:
             _validate_remux(self.partial, self.frames)
             self.partial.replace(self.path)
             duration = self.last_timestamp - self.first_timestamp + 1 / self.config.fps
-            self.result = self.store.register(
-                self.media_id, self.path, self.config.id, "video", self.trigger, duration
-            )
+            if self.register:
+                self.result = self.store.register(
+                    self.media_id, self.path, self.config.id, "video", self.trigger, duration
+                )
+            else:
+                # The audio mux indexes this file only after its own finalization succeeds.
+                self.result = {"id": self.media_id, "duration": duration, "deferred": True}
         except Exception as exc:
             self.error = f"Recording failed ({type(exc).__name__}); media retained for recovery"
             self.store.bus.publish("recording.error", self.error, self.config.id)
