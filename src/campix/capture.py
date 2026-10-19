@@ -368,28 +368,9 @@ class V4L2Backend(Backend):
         candidate.encoded_sink = self.encoded_sink
         candidate.native_disabled = self.native_disabled
         modes = candidate.native_modes()
-        exact = [
-            p
-            for p in candidate.native_profiles
-            if p["size"] == (self.config.width, self.config.height)
-            and (
-                p["min_fps"] <= self.config.fps <= p["max_fps"]
-                or (
-                    native_rate_matches(p["min_fps"], self.config.fps)
-                    and native_rate_matches(p["max_fps"], self.config.fps)
-                )
-            )
-            and (
-                p["format"] == "mjpeg"
-                or (
-                    p["format"] == "h264"
-                    and self.config.encoder == "auto"
-                    and self.encoded_sink
-                    and not self.native_disabled
-                )
-            )
-        ]
-        if modes and exact:
+        # Any listed MJPEG or H.264 mode stays on one FFmpeg owner. OpenCV remains
+        # the path for raw-only devices, where compressed capture was not advertised.
+        if modes:
             candidate.listed_modes = modes
             self.pipe = candidate
             if self.closed.is_set():
@@ -551,7 +532,75 @@ class NetworkBackend(Backend):
         quantizer = max(2, min(31, round((100 - self.config.quality) / 6)))
         return ["-c:v", "mjpeg", "-q:v", str(quantizer)]
 
+    def h264_copy_command(self):
+        """Fixed argv for a matching network H.264 elementary stream. No shell."""
+        return [
+            self.ffmpeg,
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            *self.input_arguments(),
+            "-map",
+            "0:v:0",
+            "-an",
+            "-c:v",
+            "copy",
+            "-bsf:v",
+            "h264_mp4toannexb,h264_metadata=aud=insert",
+            "-flush_packets",
+            "1",
+            "-f",
+            "mpegts",
+            "-mpegts_start_pid",
+            "256",
+            "-mpegts_pmt_start_pid",
+            "4096",
+            "-muxdelay",
+            "0",
+            "-muxpreload",
+            "0",
+            "-fps_mode",
+            "passthrough",
+            "pipe:1",
+        ]
+
+    def _copy_allowed(self):
+        return bool(
+            self.config.encoder == "auto" and self.encoded_sink and not self.native_disabled
+        )
+
     def open(self):
+        if self._copy_allowed():
+            session = H264CopySession(self, self.h264_copy_command())
+            try:
+                if session.start_matching(timeout=2.5):
+                    self.copy_session = session
+                    self.native_encoded = True
+                    self.native_attempted = True
+                    self.preview_size = preview_size(self.config.width, self.config.height)
+                    self.proc = session.proc
+                    self.capabilities.update(
+                        model=self.model,
+                        controls=[],
+                        audio=False,
+                        native_encoded=True,
+                        encoded_source="network-h264",
+                        encoder_implementation="camera-h264-passthrough",
+                        native_encoder_hardware=False,
+                        capture_to_encoder_zero_copy=False,
+                        zero_copy_scope=None,
+                        frame_delivery="latest",
+                        preview_size=list(self.preview_size),
+                        preview_fps=min(self.config.fps, 10),
+                    )
+                    return
+            except CaptureError:
+                pass
+            session.close()
+        self._open_jpeg()
+
+    def _open_jpeg(self):
         video_filter = self.video_filter()
         command = [
             self.ffmpeg,
@@ -607,6 +656,10 @@ class NetworkBackend(Backend):
                 raise CaptureError(f"{self.model} frame exceeds the supported size")
 
     def read_jpeg(self):
+        if getattr(self, "copy_session", None):
+            jpeg = self.copy_session.read_jpeg()
+            self.frame_received_at = self.copy_session.frame_received_at
+            return jpeg
         jpeg = self._read_jpeg()
         self.frame_received_at = time.monotonic()
         return jpeg
@@ -616,6 +669,11 @@ class NetworkBackend(Backend):
             return image.convert("RGB")
 
     def close(self):
+        session = getattr(self, "copy_session", None)
+        if session:
+            session.close()
+            self.copy_session = None
+            return
         if hasattr(self, "proc"):
             terminate_process(self.proc)
             if self.proc.stdout:
@@ -819,6 +877,167 @@ class NativePreview:
         if self.context is not None:
             self.context.__exit__(None, None, None)
             self.context = None
+
+
+class H264CopySession:
+    """Probe a network source for matching H.264, then publish that one capture."""
+
+    def __init__(self, owner, command):
+        self.owner = owner
+        self.command = command
+        self.proc = None
+        self.context = None
+        self.preview = None
+        self.reader = None
+        self.watch = None
+        self.stopped = threading.Event()
+        self.matched = threading.Event()
+        self.failed = threading.Event()
+        self.frames = threading.Condition()
+        self.latest_jpeg = None
+        self.reader_error = None
+        self.dropped_frames = 0
+        self.frame_received_at = 0.0
+        self.last_frame = time.monotonic()
+        self.last_native_frame = self.last_frame
+        self.preview_size = preview_size(owner.config.width, owner.config.height)
+        self.config = owner.config
+        self.ffmpeg = owner.ffmpeg
+
+    def codec_arguments(self):
+        return NetworkBackend.codec_arguments(self.owner)
+
+    def start_matching(self, timeout):
+        from .encoded import h264_dimensions
+        from .tsdemux import NativeTransportStreamDemuxer
+
+        self._dimensions = h264_dimensions
+        self.demuxer = NativeTransportStreamDemuxer()
+        self.context = owned_process(
+            self.command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+        self.proc = self.context.__enter__()
+        self.reader = threading.Thread(
+            target=self._read_transport, name=f"net-h264-{self.config.id}", daemon=True
+        )
+        self.reader.start()
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self.matched.is_set():
+                return True
+            if self.failed.is_set() or (self.proc.poll() is not None and not self.matched.is_set()):
+                self.stopped.set()
+                return False
+            self.matched.wait(0.05)
+        self.stopped.set()
+        return False
+
+    def _accept(self, unit):
+        if self.stopped.is_set():
+            return False
+        if self.matched.is_set():
+            return True
+        try:
+            size = self._dimensions(unit.data)
+        except (TypeError, ValueError):
+            return False
+        if size != (self.config.width, self.config.height):
+            self.failed.set()
+            return False
+        if self.stopped.is_set():
+            return False
+        self.preview = NativePreview(self)
+        self.preview.open()
+        if self.stopped.is_set():
+            return False
+        self.matched.set()
+        return True
+
+    def _publish(self, unit):
+        if self.stopped.is_set() or not self._accept(unit) or self.stopped.is_set():
+            return
+        for offset in range(0, len(unit.data), 65536):
+            if self.stopped.is_set():
+                return
+            final = offset + 65536 >= len(unit.data)
+            chunk = unit.data[offset : offset + 65536]
+            self.owner.encoded_sink(
+                chunk,
+                timestamp_us=unit.timestamp_us,
+                keyframe=unit.keyframe,
+                frame_complete=final,
+            )
+            self.preview.offer(chunk, frame_complete=final)
+
+    def _read_transport(self):
+        demuxer = self.demuxer
+        try:
+            read = getattr(self.proc.stdout, "read1", self.proc.stdout.read)
+            while not self.stopped.is_set() and not self.failed.is_set():
+                chunk = read(65536)
+                if not chunk:
+                    if not self.stopped.is_set() and self.proc.wait(timeout=1) == 0:
+                        for unit in demuxer.finish():
+                            self._publish(unit)
+                    raise CaptureError("Network camera is unavailable")
+                for unit in demuxer.feed(chunk):
+                    self._publish(unit)
+        except Exception:
+            self.failed.set()
+            if not self.stopped.is_set():
+                with self.frames:
+                    self.reader_error = "Network H.264 stream is unavailable"
+                    self.frames.notify_all()
+
+    def _drain(self, process, buffer, stopped):
+        try:
+            while not stopped.is_set():
+                jpeg = self.owner._read_jpeg(process, buffer)
+                with self.frames:
+                    if stopped.is_set():
+                        break
+                    if self.latest_jpeg is not None:
+                        self.dropped_frames += 1
+                    self.latest_jpeg = jpeg
+                    self.last_frame = time.monotonic()
+                    self.frames.notify_all()
+        except (CaptureError, OSError, ValueError):
+            if not stopped.is_set():
+                with self.frames:
+                    self.reader_error = "Network camera preview is unavailable"
+                    self.frames.notify_all()
+
+    def read_jpeg(self):
+        with self.frames:
+            self.frames.wait_for(
+                lambda: self.stopped.is_set() or self.latest_jpeg is not None or self.reader_error
+            )
+            if self.stopped.is_set() or self.latest_jpeg is None:
+                raise CaptureError(self.reader_error or "Network camera is unavailable")
+            jpeg, self.latest_jpeg = self.latest_jpeg, None
+            self.frame_received_at = self.last_frame
+            if time.monotonic() - self.last_frame > 5:
+                raise CaptureError("Network camera has no current frame")
+        return jpeg
+
+    def close(self):
+        self.stopped.set()
+        self.failed.set()
+        if self.preview:
+            self.preview.stopped.set()
+            self.preview.close()
+        if self.proc:
+            terminate_process(self.proc)
+        if self.reader and self.reader.is_alive():
+            self.reader.join(timeout=5)
+        if self.context:
+            self.context.__exit__(None, None, None)
+            self.context = None
+        with self.frames:
+            self.frames.notify_all()
 
 
 class DirectShowBackend(NetworkBackend):

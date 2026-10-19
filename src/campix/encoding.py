@@ -136,6 +136,10 @@ def encoder_args(
     inputs: tuple[str, ...] = ()
     output = ["-c:v", codec, "-profile:v", "baseline", "-bf", "0", "-g", str(fps)]
     if codec == "libx264":
+        # Half-second IDR interval, two threads and a bitrate ceiling. Hardware
+        # encoders keep a one-second GOP; their rate control is already explicit.
+        output[output.index("-g") + 1] = str(max(1, (fps + 1) // 2))
+        bitrate = int(max(500_000, min(8_000_000, width * height * fps * 0.07)))
         output += [
             "-pix_fmt",
             "yuv420p",
@@ -143,8 +147,14 @@ def encoder_args(
             "veryfast",
             "-tune",
             "zerolatency",
+            "-threads",
+            "2",
             "-crf",
             "23",
+            "-maxrate",
+            str(bitrate),
+            "-bufsize",
+            str(bitrate // 2),
         ]
     else:
         bitrate = int(max(500_000, min(100_000_000, width * height * fps * 0.1)))
@@ -372,6 +382,45 @@ def _smoke(
         return _ProbeResult(codec, False, "probe-process-failed", device)
     except _ProbeCancelled:
         return _ProbeResult(codec, False, "probe-canceled", device)
+
+
+def jpeg_dimensions(sample: bytes) -> tuple[int, int] | None:
+    """Read baseline, extended or progressive SOF size without decoding pixels."""
+    if not isinstance(sample, bytes) or len(sample) < 4 or not sample.startswith(b"\xff\xd8"):
+        return None
+    offset = 2
+    try:
+        while offset + 4 <= len(sample):
+            if sample[offset] != 0xFF:
+                return None
+            while offset < len(sample) and sample[offset] == 0xFF:
+                offset += 1
+            if offset >= len(sample):
+                return None
+            marker = sample[offset]
+            offset += 1
+            if marker == 0xDA:
+                return None
+            if marker in {0x01, 0xD8, 0xD9, *range(0xD0, 0xD8)}:
+                continue
+            if offset + 2 > len(sample):
+                return None
+            length = int.from_bytes(sample[offset : offset + 2], "big")
+            if length < 2 or offset + length > len(sample):
+                return None
+            if marker in {0xC0, 0xC1, 0xC2}:
+                header = sample[offset + 2 : offset + length]
+                if len(header) < 5:
+                    return None
+                height = int.from_bytes(header[1:3], "big")
+                width = int.from_bytes(header[3:5], "big")
+                if width <= 0 or height <= 0 or width > 16384 or height > 16384:
+                    return None
+                return width, height
+            offset += length
+    except (IndexError, ValueError):
+        return None
+    return None
 
 
 def _jpeg_probe_sample(sample: bytes | None, width: int, height: int) -> bytes:

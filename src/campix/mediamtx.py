@@ -367,6 +367,8 @@ class MediaPlane:
         )
         self.ready_paths = set()
         self.last_error = None
+        self._metric_cache = {}
+        self._metric_at = 0.0
         self.hls_token = (
             secrets.token_urlsafe(32) if settings.mediamtx_binary else settings.mediamtx_hls_token
         )
@@ -461,6 +463,43 @@ class MediaPlane:
                     "media_plane.error", "Media plane is unavailable; MJPEG remains available"
                 )
                 self.halt.wait(5)
+
+    def metric_samples(self):
+        """Allowlisted loopback counters. Labels and path names stay on the media server."""
+        now = time.monotonic()
+        if now - self._metric_at < 5:
+            return dict(self._metric_cache)
+        self._metric_at = now
+        allowed = {
+            "paths": "paths",
+            "webrtc_sessions": "webrtc_sessions",
+            "webrtcSessions": "webrtc_sessions",
+            "hls_muxers": "hls_muxers",
+            "hlsMuxers": "hls_muxers",
+        }
+        samples = {}
+        if self.api:
+            try:
+                with httpx.Client(timeout=0.4, trust_env=False) as client:
+                    response = client.get("http://127.0.0.1:9998/metrics")
+                if response.status_code == 200 and len(response.content) <= 262144:
+                    for line in response.text.splitlines():
+                        if not line or line.startswith("#"):
+                            continue
+                        name, _, rest = line.partition(" ")
+                        name = name.split("{", 1)[0]
+                        key = allowed.get(name)
+                        if not key:
+                            continue
+                        try:
+                            value = float(rest.split()[0])
+                        except (ValueError, IndexError):
+                            continue
+                        samples[key] = samples.get(key, 0) + value
+            except httpx.HTTPError:
+                samples = {}
+        self._metric_cache = samples
+        return dict(samples)
 
     def status(self):
         return {

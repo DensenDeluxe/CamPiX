@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import sqlite3
+import threading
 import time
 from contextlib import asynccontextmanager
 
@@ -44,6 +45,40 @@ from .system import Telemetry
 LOG = logging.getLogger(__name__)
 
 
+class StreamSlots:
+    """Bound concurrent JPEG readers per camera. WebRTC viewers do not consume a slot."""
+
+    def __init__(self, limit=4):
+        self.limit = limit
+        self.lock = threading.Lock()
+        self.counts = {}
+
+    def acquire(self, key):
+        with self.lock:
+            if self.counts.get(key, 0) >= self.limit:
+                return False
+            self.counts[key] = self.counts.get(key, 0) + 1
+            return True
+
+    def release(self, key):
+        with self.lock:
+            remaining = self.counts.get(key, 0) - 1
+            if remaining > 0:
+                self.counts[key] = remaining
+            else:
+                self.counts.pop(key, None)
+
+
+def _metric(name, value, labels=""):
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        value = int(value)
+    if isinstance(value, float):
+        value = f"{value:.4f}"
+    return f"{name}{labels} {value}"
+
+
 class MediaLock(StrictModel):
     locked: bool
 
@@ -70,6 +105,7 @@ def create_app(settings: Settings | None = None):
     scheduler = Scheduler(db, cameras, store, bus)
     media_plane = MediaPlane(settings, cameras, bus)
     telemetry = Telemetry(settings)
+    preview_slots = StreamSlots()
     exports = ExportService(db, store, settings, bus)
     process_lock = ProcessLock(settings.data_dir)
     saved_storage = db.setting("storage")
@@ -201,6 +237,11 @@ def create_app(settings: Settings | None = None):
         "job_id",
         "schedule_id",
         "protocol",
+        "view",
+        "x",
+        "y",
+        "w",
+        "h",
     } | {
         field
         for model in (
@@ -231,6 +272,7 @@ def create_app(settings: Settings | None = None):
             "Each snapshot may be selected once",
             "days must contain distinct weekday numbers 0–6",
             "Unknown IANA timezone",
+            "Motion region must stay inside the frame",
         )
     }
 
@@ -451,28 +493,42 @@ def create_app(settings: Settings | None = None):
         return cameras.get(camera_id).stop_recording()
 
     @app.get("/api/v1/cameras/{camera_id}/preview.jpg", dependencies=[Depends(viewer)])
-    def preview(camera_id: str):
-        return Response(cameras.get(camera_id).frame()[1], media_type="image/jpeg")
+    def preview(camera_id: str, view: str = ""):
+        if view not in {"", "live"}:
+            raise HTTPException(400, "Unknown preview view")
+        if not preview_slots.acquire(camera_id):
+            raise HTTPException(429, "Too many live preview readers", headers={"Retry-After": "1"})
+        try:
+            camera = cameras.get(camera_id)
+            payload = camera.live_frame() if view == "live" else camera.frame()[1]
+            return Response(payload, media_type="image/jpeg")
+        finally:
+            preview_slots.release(camera_id)
 
     async def mjpeg(camera_id, token):
+        if not preview_slots.acquire(camera_id):
+            raise HTTPException(429, "Too many live preview readers", headers={"Retry-After": "1"})
         camera = cameras.get(camera_id)
         sequence = -1
-        while auth.session(token):
-            try:
-                current, frame = await asyncio.to_thread(camera.frame, sequence, 3)
-            except CaptureError:
-                break
-            if current == sequence:
-                await asyncio.sleep(0.1)
-                continue
-            sequence = current
-            yield (
-                b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "
-                + str(len(frame)).encode()
-                + b"\r\n\r\n"
-                + frame
-                + b"\r\n"
-            )
+        try:
+            while auth.session(token):
+                try:
+                    current, frame = await asyncio.to_thread(camera.frame, sequence, 3)
+                except CaptureError:
+                    break
+                if current == sequence:
+                    await asyncio.sleep(0.1)
+                    continue
+                sequence = current
+                yield (
+                    b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "
+                    + str(len(frame)).encode()
+                    + b"\r\n\r\n"
+                    + frame
+                    + b"\r\n"
+                )
+        finally:
+            preview_slots.release(camera_id)
 
     @app.get("/api/v1/cameras/{camera_id}/stream.mjpg", dependencies=[Depends(viewer)])
     def stream(camera_id: str, request: Request):
@@ -598,17 +654,40 @@ def create_app(settings: Settings | None = None):
     def metrics():
         system = telemetry.read()
         lines = [
-            f"campix_uptime_seconds {system['uptime_seconds']}",
-            f"campix_process_memory_bytes {system['process_memory_bytes']}",
-            f"campix_disk_free_bytes {system['disk_free_bytes']}",
+            sample
+            for sample in (
+                _metric("campix_uptime_seconds", system["uptime_seconds"]),
+                _metric("campix_process_memory_bytes", system["process_memory_bytes"]),
+                _metric("campix_process_cpu_percent", system["process_cpu_percent"]),
+                _metric("campix_cpu_percent", system["cpu_percent"]),
+                _metric("campix_temperature_celsius", system["temperature_c"]),
+                _metric("campix_disk_free_bytes", system["disk_free_bytes"]),
+                _metric("campix_mediamtx_up", int(bool(media_plane.api))),
+            )
+            if sample
         ]
+        for name, value in media_plane.metric_samples().items():
+            sample = _metric(f"campix_mediamtx_{name}", value)
+            if sample:
+                lines.append(sample)
         for camera in cameras.list():
+            labels = f'{{camera="{camera["id"]}"}}'
             for metric, value in (
                 ("fps", camera["fps"]),
                 ("dropped_frames", camera["dropped_frames"]),
+                ("capture_dropped_frames", camera["capture_dropped_frames"]),
+                ("frame_age_seconds", camera["frame_age_seconds"]),
+                ("preroll_bytes", camera["preroll_bytes"]),
+                ("encoded_buffered_bytes", camera["encoded_buffered_bytes"]),
+                ("encoded_dropped_frames", camera["encoded_dropped_frames"]),
+                ("encoded_frame_age_seconds", camera["encoded_frame_age_seconds"]),
+                ("recording_write_bytes", camera["recording_write_bytes"]),
+                ("shed_level", camera["shed_level"]),
                 ("online", int(camera["status"] == "online")),
             ):
-                lines.append(f'campix_camera_{metric}{{camera="{camera["id"]}"}} {value}')
+                sample = _metric(f"campix_camera_{metric}", value, labels)
+                if sample:
+                    lines.append(sample)
         return Response("\n".join(lines) + "\n", media_type="text/plain; version=0.0.4")
 
     @app.websocket("/api/v1/events/ws")

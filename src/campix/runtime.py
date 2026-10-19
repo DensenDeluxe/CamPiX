@@ -9,18 +9,81 @@ import threading
 import time
 from collections import deque
 from concurrent.futures import Future, TimeoutError
+from pathlib import Path
 
 import numpy as np
 from PIL import Image
 
+from .budget import admission_reason, shed_level_for
 from .capture import CaptureError, make_backend
 from .encoded import AnnexBParser, EncodedHub, h264_dimensions
-from .encoding import EncoderSelection, EncoderUnavailable, select_encoder
+from .encoding import EncoderSelection, EncoderUnavailable, jpeg_dimensions, select_encoder
 from .models import CameraConfig
 from .recording import EncodedRecorder, encoder_probe
 from .shared_encoder import SharedEncoder
 
 LOG = logging.getLogger(__name__)
+JPEG_PREROLL_BYTES = 32 * 1024 * 1024
+
+
+def trim_jpeg_history(frames, now, seconds, hub_ready, max_bytes=JPEG_PREROLL_BYTES):
+    """Keep the newest JPEG. Drop history once the encoded hub has a keyframe."""
+    total = sum(len(payload) for _, payload in frames)
+    while len(frames) > 1 and (
+        hub_ready or now - frames[0][0] > seconds or total > max_bytes
+    ):
+        total -= len(frames.popleft()[1])
+    return total
+
+
+def downscale_jpeg(payload: bytes, max_width: int = 960, max_height: int = 540) -> bytes:
+    """Build one small baseline JPEG for the live fallback. Callers stay off the capture thread."""
+    with Image.open(io.BytesIO(payload)) as image:
+        image.draft("RGB", (max_width, max_height))
+        frame = image.convert("RGB")
+        frame.thumbnail((max_width, max_height))
+        width, height = frame.size
+        even = (max(2, width - width % 2), max(2, height - height % 2))
+        if even != frame.size:
+            frame = frame.resize(even)
+        out = io.BytesIO()
+        frame.save(out, "JPEG", quality=70)
+        return out.getvalue()
+
+
+def motion_score(previous, gray, pixel_delta: int, regions) -> float:
+    """Fraction of changed samples. Regions are normalized and already inside the frame."""
+    changed = np.abs(gray.astype(np.int16) - previous.astype(np.int16)) > pixel_delta
+    if regions:
+        height, width = gray.shape
+        mask = np.zeros(gray.shape, dtype=bool)
+        for region in regions:
+            x0, y0 = int(region.x * width), int(region.y * height)
+            x1 = min(width, int((region.x + region.w) * width))
+            y1 = min(height, int((region.y + region.h) * height))
+            if x1 > x0 and y1 > y0:
+                mask[y0:y1, x0:x1] = True
+        if mask.any():
+            return float(np.mean(changed[mask]))
+    return float(np.mean(changed))
+
+
+def host_load_ratio() -> float | None:
+    try:
+        load = float(Path("/proc/loadavg").read_text().split()[0])
+    except (OSError, ValueError, IndexError):
+        return None
+    return load / max(1, os.cpu_count() or 1)
+
+
+def host_temperature() -> float | None:
+    thermal = Path("/sys/class/thermal/thermal_zone0/temp")
+    if not thermal.is_file():
+        return None
+    try:
+        return float(thermal.read_text()) / 1000
+    except (OSError, ValueError):
+        return None
 
 
 class Camera:
@@ -54,6 +117,10 @@ class Camera:
         self.processing_times = deque(maxlen=120)
         self.preroll = deque()
         self.preroll_bytes = 0
+        self.live_jpeg = None
+        self.live_preview_at = 0.0
+        self.shed_level = 0
+        self.shed_checked = 0.0
         self.analysis = None
         self.analysis_sequence = 0
         self.recorder = None
@@ -250,17 +317,23 @@ class Camera:
                     if self.halt.is_set():
                         break
                     if native_jpeg:
-                        # Reading the JPEG header does not decode pixels. The adapter's
-                        # correctly sized bytes can feed preview, encoding and pre-roll.
-                        with Image.open(io.BytesIO(jpeg)) as encoded:
-                            if encoded.format != "JPEG":
-                                raise CaptureError("Capture adapter returned an invalid JPEG")
-                            expected = (
-                                tuple(backend.preview_size)
-                                if backend.native_encoded
-                                else (self.config.width, self.config.height)
-                            )
-                            if encoded.size != expected:
+                        # A SOF header check does not decode pixels. Pillow runs only when
+                        # the frame is not a recognizable JPEG of the expected size.
+                        expected = (
+                            tuple(backend.preview_size)
+                            if backend.native_encoded
+                            else (self.config.width, self.config.height)
+                        )
+                        size = jpeg_dimensions(jpeg)
+                        if size is None:
+                            with Image.open(io.BytesIO(jpeg)) as encoded:
+                                if encoded.format != "JPEG":
+                                    raise CaptureError("Capture adapter returned an invalid JPEG")
+                                size = encoded.size
+                                if size != expected:
+                                    image = encoded.convert("RGB")
+                        elif size != expected:
+                            with Image.open(io.BytesIO(jpeg)) as encoded:
                                 image = encoded.convert("RGB")
                     if image is not None:
                         expected = (
@@ -274,6 +347,7 @@ class Camera:
                         image.save(preview, "JPEG", quality=self.config.quality)
                         jpeg = preview.getvalue()
                     now = time.monotonic()
+                    hub_ready = bool(self.encoded_hub.stats().get("ready"))
                     frame_time = getattr(backend, "frame_received_at", now)
                     if now - frame_time > 5:
                         raise CaptureError("Capture processing cannot keep up with the live source")
@@ -295,13 +369,9 @@ class Camera:
                         self.analysis = jpeg if self.config.motion_enabled else None
                         self.analysis_sequence = self.sequence
                         self.preroll.append((frame_time, jpeg))
-                        self.preroll_bytes += len(jpeg)
-                        while self.preroll and (
-                            now - self.preroll[0][0] > self.config.preroll_seconds
-                            or self.preroll_bytes > 32 * 1024 * 1024
-                        ):
-                            _, old = self.preroll.popleft()
-                            self.preroll_bytes -= len(old)
+                        self.preroll_bytes = trim_jpeg_history(
+                            self.preroll, now, self.config.preroll_seconds, hub_ready
+                        )
                         self.condition.notify_all()
                     self._save_snapshots(backend, jpeg)
                     failures = 0
@@ -370,13 +440,49 @@ class Camera:
         with Image.open(io.BytesIO(jpeg)) as image:
             # JPEG draft downsamples during decoding, avoiding a full-resolution RGB
             # allocation for a 160x90 analysis sample, including on 4K sources.
+            # Native preview JPEGs are already small; draft keeps that path cheap.
             image.draft("L", (160, 90))
             return np.array(image.convert("L").resize((160, 90)))
+
+    def _update_live_preview(self, jpeg):
+        now = time.monotonic()
+        if now - self.live_preview_at < 0.5:
+            return
+        size = jpeg_dimensions(jpeg)
+        try:
+            preview = jpeg if size and size[0] <= 960 and size[1] <= 540 else downscale_jpeg(jpeg)
+        except (OSError, ValueError):
+            return
+        with self.condition:
+            self.live_jpeg = preview
+            self.live_preview_at = now
+
+    def _refresh_shed(self):
+        now = time.monotonic()
+        if now - self.shed_checked < 2:
+            return
+        self.shed_checked = now
+        # Explicit demo mode skips load-average shedding so synthetic tests stay timed
+        # by the profile. Temperature still applies on every host.
+        load = None if self.settings.demo else host_load_ratio()
+        level = shed_level_for(host_temperature(), load)
+        if level != self.shed_level:
+            self.shed_level = level
+            self.bus.publish(
+                "camera.load",
+                f"Capture load shed level {level}",
+                self.config.id,
+                {"level": level},
+            )
 
     def _motion(self):
         previous, sequence, active_frames = None, 0, 0
         last_motion = 0
-        while not self.halt.wait(0.2):
+        while True:
+            self._refresh_shed()
+            interval = 0.2 if self.shed_level < 1 else 0.5 if self.shed_level == 1 else 1
+            if self.halt.wait(interval):
+                break
             try:
                 with self.condition:
                     jpeg, current = self.analysis, self.analysis_sequence
@@ -388,15 +494,14 @@ class Camera:
                         self.status = "stalled"
                         self.error = "Frame delivery stalled; waiting for the camera driver"
                         self.bus.publish("camera.stalled", self.error, self.config.id)
+                if jpeg is not None and current != sequence:
+                    self._update_live_preview(jpeg)
                 if self.config.motion_enabled and jpeg is not None and current != sequence:
                     gray = self._motion_gray(jpeg)
                     sequence = current
                     if previous is not None:
-                        score = float(
-                            np.mean(
-                                np.abs(gray.astype(np.int16) - previous.astype(np.int16))
-                                > self.config.motion_pixel_delta
-                            )
+                        score = motion_score(
+                            previous, gray, self.config.motion_pixel_delta, self.config.motion_regions
                         )
                         active_frames = (
                             active_frames + 1 if score >= self.config.motion_threshold else 0
@@ -440,6 +545,13 @@ class Camera:
                     "Camera %s analysis/recording failed: %s", self.config.id, type(exc).__name__
                 )
                 self.halt.wait(2)
+
+    def live_frame(self):
+        """Small JPEG for the browser fallback. Full frame until the first preview exists."""
+        with self.condition:
+            if self.live_jpeg and time.monotonic() - self.live_preview_at < 2:
+                return self.live_jpeg
+        return self.frame()[1]
 
     def frame(self, sequence=None, timeout=10):
         current, jpeg, _ = self.frame_packet(sequence, timeout)
@@ -624,6 +736,12 @@ class Camera:
                 if self.processing_times
                 else None,
                 "preroll_bytes": self.preroll_bytes,
+                "encoded_buffered_bytes": encoded["buffered_bytes"],
+                "encoded_subscribers": encoded["subscribers"],
+                "encoded_dropped_frames": encoded["dropped_frames"],
+                "encoded_frame_age_seconds": encoded["last_frame_age_seconds"],
+                "shed_level": self.shed_level,
+                "recording_write_bytes": getattr(recorder, "bytes_written", 0) if recorder else 0,
                 "motion_enabled": self.config.motion_enabled,
                 "motion_threshold": self.config.motion_threshold,
                 "controls": self.config.controls.copy(),
@@ -774,6 +892,30 @@ class CameraManager:
         with self.lock:
             if config.backend == "synthetic" and not self.settings.demo:
                 raise CaptureError("Synthetic cameras require explicit --demo mode")
+            camera_count = len(self.cameras) + (0 if config.id in self.cameras else 1)
+            try:
+                import psutil
+
+                memory_total = int(psutil.virtual_memory().total)
+            except (OSError, ValueError):
+                memory_total = 0
+            model = ""
+            device_model = Path("/proc/device-tree/model")
+            if device_model.is_file():
+                try:
+                    model = device_model.read_text().strip("\x00\n")
+                except OSError:
+                    model = ""
+            reason = admission_reason(
+                width=config.width,
+                height=config.height,
+                fps=config.fps,
+                memory_total=memory_total,
+                camera_count=camera_count,
+                model=model,
+            )
+            if reason:
+                raise CaptureError(reason)
             if config.id not in self.cameras and len(self.cameras) >= self.settings.max_cameras:
                 raise CaptureError("Camera limit reached")
             if any(

@@ -74,6 +74,8 @@
     ],
     encoderChecking: ["Encoder wird geprüft …", "Checking encoder …"],
     captureFps: ["Kamera", "Camera"],
+    frameAge: ["Alter", "Age"],
+    drops: ["Drops", "Drops"],
     liveEncoder: ["Live-Encoder", "Live encoder"],
     preparedEncoder: ["Geprüfter Encoder", "Prepared encoder"],
     fullscreen: ["Vollbild", "Fullscreen"],
@@ -350,6 +352,7 @@
     );
     if (view === "overview" && !document.hidden) startStream();
     else stopStream();
+    if (s.user) act(refresh);
   }
   function showLogin() {
     s.user = null;
@@ -380,33 +383,44 @@
   async function refresh() {
     if (!s.user) return;
     const generation = ++s.refreshGeneration;
-    const [cameras, system, media, recent, schedules, events] =
-      await Promise.all([
-        api("/cameras"),
-        api("/system"),
-        api(
-          mediaPath({
-            limit: 24,
-            offset: s.offset,
-            kind: s.kind,
-            query: s.query,
-          }),
-        ),
-        api(mediaPath({ limit: 3, offset: 0 })),
-        api("/schedules"),
-        api("/events?limit=10"),
-      ]);
+    const view = s.view;
+    const jobs = {
+      cameras: api("/cameras"),
+      system: api("/system"),
+    };
+    if (view === "overview" || view === "media")
+      jobs.recent = api(mediaPath({ limit: 3, offset: 0 }));
+    if (view === "media")
+      jobs.media = api(
+        mediaPath({
+          limit: 24,
+          offset: s.offset,
+          kind: s.kind,
+          query: s.query,
+        }),
+      );
+    if (view === "scheduler") jobs.schedules = api("/schedules");
+    if (view === "overview") jobs.events = api("/events?limit=10");
+    const names = Object.keys(jobs);
+    const results = await Promise.all(names.map((name) => jobs[name]));
     if (!s.user || generation !== s.refreshGeneration) return;
-    s.cameras = cameras;
-    s.system = system;
-    s.media = media.items;
-    s.total = media.total;
-    s.recent = recent.items;
-    s.libraryTotal = recent.total;
-    s.schedules = schedules;
-    s.events = events;
-    if (!cameras.some((c) => c.id === s.selected)) {
-      s.selected = cameras[0]?.id || "";
+    const data = Object.fromEntries(
+      names.map((name, index) => [name, results[index]]),
+    );
+    s.cameras = data.cameras;
+    s.system = data.system;
+    if (data.media) {
+      s.media = data.media.items;
+      s.total = data.media.total;
+    }
+    if (data.recent) {
+      s.recent = data.recent.items;
+      s.libraryTotal = data.recent.total;
+    }
+    if (data.schedules) s.schedules = data.schedules;
+    if (data.events) s.events = data.events;
+    if (!data.cameras.some((c) => c.id === s.selected)) {
+      s.selected = data.cameras[0]?.id || "";
       s.cameraDirty = s.dirtyControls = false;
     }
     render();
@@ -414,7 +428,7 @@
       stopStream();
       $("#live-empty").hidden = false;
     }
-    if (admin()) {
+    if (admin() && s.view === "settings") {
       const [settings, users] = await Promise.all([
         api("/settings"),
         api("/users"),
@@ -522,6 +536,12 @@
     $("#actual-fps").textContent = c
       ? `${t("captureFps")} ${c.fps} / ${c.fps_target} FPS`
       : "—";
+    $("#actual-age").textContent = c
+      ? `${t("frameAge")} ${c.frame_age_seconds ?? "—"} s`
+      : "";
+    $("#actual-drops").textContent = c
+      ? `${t("drops")} ${c.capture_dropped_frames} / ${c.dropped_frames}`
+      : "";
     $("#actual-fps").title = publisher?.encoder
       ? `${t("liveEncoder")}: ${publisher.encoder}${publisher.fallback_reason ? " · " + publisher.fallback_reason : ""}`
       : c?.encoding.selected
@@ -688,7 +708,7 @@
         // Request the current frame only after the preceding frame is decoded.
         // Multipart image buffering cannot be bounded by the browser UI.
         const response = await fetch(
-          `/api/v1/cameras/${encodeURIComponent(camera)}/preview.jpg`,
+          `/api/v1/cameras/${encodeURIComponent(camera)}/preview.jpg?view=live`,
           {
             credentials: "same-origin",
             cache: "no-store",
@@ -703,11 +723,6 @@
         if (!response.ok) throw new Error("Live frame unavailable");
         url = URL.createObjectURL(await response.blob());
         preview.pendingUrl = url;
-        const image = new Image();
-        image.src = url;
-        await decodePreview(image, controller.signal);
-        if (!current()) return;
-        if (controller.signal.aborted) throw new Error("Live frame timed out");
         const displayed = $("#live-image");
         displayed.src = url;
         await decodePreview(displayed, controller.signal);

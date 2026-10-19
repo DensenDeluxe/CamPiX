@@ -15,8 +15,8 @@ from .tsmux import TransportStreamMuxer
 def _validate_remux(path, expected_frames):
     """Verify finalized MP4 structure and video sample count without decoding pixels."""
     size = path.stat().st_size
-    types, samples, media_bytes = set(), [], 0
-    containers = {b"moov", b"trak", b"mdia", b"minf", b"stbl"}
+    types, samples, trun_samples, media_bytes = set(), [], [], 0
+    containers = {b"moov", b"trak", b"mdia", b"minf", b"stbl", b"moof", b"traf"}
     with path.open("rb") as stream:
         pending = [(0, size, 0)]
         boxes = 0
@@ -58,11 +58,18 @@ def _validate_remux(path, expected_frames):
                     if not constant_size and length < header_size + 12 + count * 4:
                         raise RuntimeError("Recording contains a truncated sample table")
                     samples.append(count)
+                elif kind == b"trun":
+                    sample_header = stream.read(8)
+                    if len(sample_header) != 8 or length < header_size + 8:
+                        raise RuntimeError("Recording contains an incomplete track run")
+                    trun_samples.append(int.from_bytes(sample_header[4:8], "big"))
                 position += length
+    counted = sum(trun_samples) or sum(samples)
     if (
-        not {b"ftyp", b"moov", b"mdat"}.issubset(types)
+        not {b"ftyp", b"moov"}.issubset(types)
+        or b"mdat" not in types
         or not media_bytes
-        or samples != [expected_frames]
+        or counted != expected_frames
     ):
         raise RuntimeError("Remuxer did not finalize all recorded video frames")
 
@@ -84,6 +91,7 @@ class EncodedRecorder:
         self.stop_requested, self.done = threading.Event(), threading.Event()
         self.stop_lock = threading.Lock()
         self.frames = self.dropped = 0
+        self.bytes_written = 0
         self.error = self.result = None
         self.cutoff = None
         self.first_timestamp = self.last_timestamp = None
@@ -123,8 +131,11 @@ class EncodedRecorder:
                 "copy",
                 "-avoid_negative_ts",
                 "make_zero",
+                # Fragmented MP4 is playable as it is written. Finalization does not
+                # rewrite the file to move the moov atom, and the library still indexes
+                # the recording only after this remux succeeds.
                 "-movflags",
-                "+faststart",
+                "+frag_keyframe+empty_moov+default_base_moof",
                 "-f",
                 "mp4",
                 str(self.partial),
@@ -190,8 +201,10 @@ class EncodedRecorder:
                 self.progress_at = time.monotonic()
                 self.writing = True
                 try:
-                    if self.proc.stdin.write(data) != len(data):
+                    written = self.proc.stdin.write(data)
+                    if written != len(data):
                         raise RuntimeError("Remuxer accepted an incomplete video packet")
+                    self.bytes_written += written
                 finally:
                     self.writing = False
                 self.frames += 1
@@ -240,7 +253,10 @@ def encoder_probe(ffmpeg):
 
 
 class Recorder:
-    """One bounded writer per camera; FFmpeg backpressure never stalls capture."""
+    """Legacy JPEG writer retained for the idle-encoder regression.
+
+    Production recordings use EncodedRecorder and the shared H.264 hub.
+    """
 
     def __init__(
         self, config, settings, store, preroll, trigger="manual", duration=None, *, selection=None
