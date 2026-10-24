@@ -1,4 +1,6 @@
 import io
+import threading
+import time
 from collections import deque
 from types import SimpleNamespace
 
@@ -145,6 +147,210 @@ def test_abandoned_h264_copy_does_not_publish():
     session._publish(unit)
     assert published == []
     assert session.matched.is_set() is False
+
+
+class _StallProcess:
+    def __init__(self):
+        self.killed = threading.Event()
+        self.returncode = None
+        self.stdout = self
+
+    def read1(self, _size):
+        self.killed.wait(5)
+        return b""
+
+    read = read1
+
+    def close(self):
+        return None
+
+    def poll(self):
+        return self.returncode
+
+    def kill(self):
+        self.returncode = -9
+        self.killed.set()
+
+    def terminate(self):
+        if self.returncode is None:
+            self.returncode = 1
+        self.killed.set()
+
+    def wait(self, timeout=None):
+        self.killed.wait(timeout)
+        return self.returncode
+
+
+def test_stalled_network_jpeg_is_stopped_so_capture_can_reconnect(monkeypatch):
+    process = _StallProcess()
+    monkeypatch.setattr(capture.subprocess, "Popen", lambda command, **kwargs: process)
+    backend = capture.NetworkBackend(
+        CameraConfig(id="ip", name="IP", backend="network", source="rtsp://192.0.2.10/live"),
+        "ffmpeg",
+    )
+    backend.stall_seconds = 0.25
+    backend.open()
+    try:
+        with pytest.raises(capture.CaptureError):
+            backend.read_jpeg()
+        assert process.killed.is_set()
+    finally:
+        backend.close()
+
+
+def test_network_h264_watchdog_stops_a_silent_copy(monkeypatch):
+    process = _StallProcess()
+    backend = capture.NetworkBackend(
+        CameraConfig(id="ip", name="IP", backend="network", source="rtsp://192.0.2.10/live"),
+        "ffmpeg",
+    )
+    session = capture.H264CopySession(backend, ["ffmpeg"])
+    session.proc = process
+    session.stall_seconds = 0.25
+    session.start_watch()
+    try:
+        assert process.killed.wait(1.5)
+        with pytest.raises(capture.CaptureError, match="stalled"):
+            session.read_jpeg()
+    finally:
+        session.close()
+
+
+def test_network_jpeg_watchdog_ignores_bytes_that_never_form_a_frame(monkeypatch):
+    class Trickle(_StallProcess):
+        def read1(self, _size):
+            if self.killed.is_set():
+                return b""
+            time.sleep(0.02)
+            return b"\x00" * 1024
+
+    process = Trickle()
+    monkeypatch.setattr(capture.subprocess, "Popen", lambda command, **kwargs: process)
+    backend = capture.NetworkBackend(
+        CameraConfig(id="ip", name="IP", backend="network", source="rtsp://192.0.2.10/live"),
+        "ffmpeg",
+    )
+    backend.stall_seconds = 0.25
+    backend.open()
+    try:
+        with pytest.raises(capture.CaptureError):
+            backend.read_jpeg()
+        assert process.killed.is_set()
+    finally:
+        backend.close()
+
+
+def test_prompt_network_jpeg_is_not_treated_as_stalled(monkeypatch):
+    payload = jpeg(320, 180)
+    released = threading.Event()
+
+    class Prompt:
+        def __init__(self):
+            self.killed = False
+            self.returncode = None
+            self.sent = False
+            self.stdout = self
+
+        def read1(self, _size):
+            if not self.sent:
+                self.sent = True
+                return payload
+            released.wait(2)
+            return b""
+
+        read = read1
+
+        def close(self):
+            return None
+
+        def poll(self):
+            return self.returncode
+
+        def kill(self):
+            self.killed = True
+            self.returncode = -9
+            released.set()
+
+        def terminate(self):
+            self.returncode = 1
+            released.set()
+
+        def wait(self, timeout=None):
+            return self.returncode if self.returncode is not None else 0
+
+    process = Prompt()
+    monkeypatch.setattr(capture.subprocess, "Popen", lambda command, **kwargs: process)
+    backend = capture.NetworkBackend(
+        CameraConfig(id="ip", name="IP", backend="network", source="rtsp://192.0.2.10/live"),
+        "ffmpeg",
+    )
+    backend.stall_seconds = 1
+    backend.open()
+    try:
+        assert backend.read_jpeg() == payload
+        assert process.killed is False
+    finally:
+        backend.close()
+
+
+def test_v4l2_mjpeg_with_shared_sink_does_not_open_a_network_h264_probe(monkeypatch):
+    probes = []
+    launched = []
+
+    def spy(self, timeout):
+        probes.append(self.command)
+        return False
+
+    def popen(command, **kwargs):
+        launched.append(command)
+        return SimpleNamespace(
+            stdout=io.BytesIO(),
+            stdin=None,
+            poll=lambda: None,
+            terminate=lambda: None,
+            kill=lambda: None,
+            wait=lambda timeout=None: 0,
+        )
+
+    monkeypatch.setattr(capture.H264CopySession, "start_matching", spy)
+    monkeypatch.setattr(capture.subprocess, "Popen", popen)
+    monkeypatch.setattr(capture.V4L2Backend, "_load_controls", lambda self: None)
+
+    def modes(self):
+        self.native_profiles = [
+            {
+                "size": (640, 480),
+                "min_fps": 30,
+                "max_fps": 30,
+                "format_type": "vcodec",
+                "format": "mjpeg",
+            }
+        ]
+        return [(640, 480)]
+
+    monkeypatch.setattr(capture.V4L2CompressedBackend, "native_modes", modes)
+    backend = capture.make_backend(
+        CameraConfig(
+            id="usb",
+            name="USB",
+            backend="v4l2",
+            source="/dev/video0",
+            width=640,
+            height=480,
+            fps=10,
+        ),
+        "ffmpeg",
+    )
+    backend.set_encoded_sink(lambda *args, **kwargs: None)
+    backend.open()
+    try:
+        assert probes == []
+        assert len(launched) == 1
+        command = launched[0]
+        assert command[command.index("-f") + 1] == "v4l2"
+        assert "mpegts" not in command
+    finally:
+        backend.close()
 
 
 def test_network_copy_falls_back_to_jpeg_when_the_probe_does_not_match(monkeypatch):
