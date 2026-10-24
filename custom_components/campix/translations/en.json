@@ -1,0 +1,35 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect CamPiX",
+        "description": "Home Assistant can discover CamPiX on the local network. Enter the CamPiX administrator once. The password is used to create a viewer token and is not stored.",
+        "data": {
+          "host": "Host",
+          "port": "Port",
+          "tls": "Use HTTPS",
+          "username": "Administrator username",
+          "password": "Administrator password"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Reconnect CamPiX",
+        "description": "The viewer token was rejected. Enter the CamPiX administrator to create a new one. Enable HTTPS when CamPiX uses secure cookies.",
+        "data": {
+          "username": "Administrator username",
+          "password": "Administrator password"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "CamPiX did not respond. Check the address, port, and HTTPS.",
+      "invalid_auth": "The administrator username or password was rejected.",
+      "pair_failed": "CamPiX accepted the password but did not keep the session. Enable HTTPS when secure cookies are on.",
+      "too_many_tokens": "CamPiX already has eight API tokens. Revoke one, then try again."
+    },
+    "abort": {
+      "already_configured": "This CamPiX service is already configured.",
+      "reauth_successful": "CamPiX was reconnected."
+    }
+  }
+}
