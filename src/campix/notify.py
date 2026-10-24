@@ -139,7 +139,8 @@ def webhook_targets(url: str, timeout: float = 5) -> list[str]:
             raise ValueError("Webhook address is not allowed")
         if host in LOOPBACK_HOSTS and not ip.is_loopback:
             raise ValueError("Webhook address is not allowed")
-        addresses.append(info[4][0])
+        if info[4][0] not in addresses:
+            addresses.append(info[4][0])
     if not addresses:
         raise ValueError("Webhook address is not allowed")
     return addresses
@@ -180,40 +181,49 @@ def deliver_webhook(url: str, body: bytes, secret: str, timeout: float = 5) -> N
     parts = urlsplit(validate_webhook_url(url))
     host = parts.hostname
     port = parts.port or (443 if parts.scheme == "https" else 80)
-    target = webhook_targets(url, timeout)[0]
+    targets = webhook_targets(url, timeout)
     timestamp = int(time.time())
     signature = sign_delivery(secret, timestamp, body)
     path = parts.path or "/"
     if parts.query:
         path = f"{path}?{parts.query}"
+    headers = {
+        "Host": _authority(host, port, parts.port is not None),
+        "Content-Type": "application/json",
+        "Content-Length": str(len(body)),
+        "CamPiX-Timestamp": str(timestamp),
+        "CamPiX-Signature": f"v1={signature}",
+        "User-Agent": "CamPiX",
+        "Connection": "close",
+    }
+    # A refused connection can be one of several resolved addresses. An HTTP
+    # rejection is the server's answer and stops the attempt.
+    for target in targets:
+        try:
+            status = _post_webhook(parts.scheme, host, port, target, path, body, headers, timeout)
+        except (OSError, TimeoutError, http.client.HTTPException):
+            continue
+        if 200 <= status < 300:
+            return
+        raise DeliveryError("Webhook delivery was rejected")
+    raise DeliveryError("Webhook delivery failed")
+
+
+def _post_webhook(scheme, host, port, target, path, body, headers, timeout) -> int:
     sock = socket.create_connection((target, port), timeout)
     try:
-        if parts.scheme == "https":
+        if scheme == "https":
             sock = ssl.create_default_context().wrap_socket(sock, server_hostname=host)
         connection = http.client.HTTPConnection(host, port, timeout=timeout)
         connection.sock = sock
-        connection.request(
-            "POST",
-            path,
-            body=body,
-            headers={
-                "Host": _authority(host, port, parts.port is not None),
-                "Content-Type": "application/json",
-                "Content-Length": str(len(body)),
-                "CamPiX-Timestamp": str(timestamp),
-                "CamPiX-Signature": f"v1={signature}",
-                "User-Agent": "CamPiX",
-                "Connection": "close",
-            },
-        )
+        connection.request("POST", path, body=body, headers=headers)
         response = connection.getresponse()
         status = response.status
         response.read(1024)
         response.close()
+        return status
     finally:
         sock.close()
-    if status < 200 or status >= 300:
-        raise DeliveryError("Webhook delivery was rejected")
 
 
 def deliver_mail(recipient: str, port: int, body: str, timeout: float = 5) -> None:
