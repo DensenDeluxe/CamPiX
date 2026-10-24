@@ -81,6 +81,9 @@ test("real capture, recording, library, schedule and persistent profile", async 
   await expect(page.locator("#schedule-list h3")).toHaveText(
     "Browser schedule",
   );
+  await expect(page.locator("#schedule-list .subhead")).toContainText(
+    "täglich",
+  );
   await page.locator(".nav-item[data-view=settings]").click();
   await page.locator("#setting-camera-name").fill("Browser validated camera");
   await page.locator("#camera-settings-form button").click();

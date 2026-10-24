@@ -152,6 +152,15 @@
       "Fotos und zeitbegrenzte Aufnahmen mit gespeicherten Regeln.",
       "Photos and timed recordings with persistent rules.",
     ],
+    weekdays: ["Wochentage", "Weekdays"],
+    everyDay: ["täglich", "every day"],
+    mon: ["Mo", "Mon"],
+    tue: ["Di", "Tue"],
+    wed: ["Mi", "Wed"],
+    thu: ["Do", "Thu"],
+    fri: ["Fr", "Fri"],
+    sat: ["Sa", "Sat"],
+    sun: ["So", "Sun"],
     newSchedule: ["＋ Neuer Zeitplan", "＋ New schedule"],
     devicesHint: [
       "Erkannte Fähigkeiten und tatsächlicher Verbindungsstatus.",
@@ -1370,7 +1379,7 @@
           make(
             "p",
             "subhead",
-            `${job.camera_id} · ${job.action} · ${job.interval_seconds}s · ${job.start_hour}:00–${job.end_hour}:00 · ${job.timezone}`,
+            `${job.camera_id} · ${job.action} · ${job.interval_seconds}s · ${scheduleDays(job)} · ${job.start_hour}:00–${job.end_hour}:00 · ${job.timezone}`,
           ),
           make("small", "", job.enabled ? date(job.next_run) : t("disabled")),
         );
@@ -1406,6 +1415,18 @@
     );
     if (!s.schedules.length)
       $("#schedule-list").append(make("p", "empty-message", t("empty")));
+  }
+  function scheduleDays(job) {
+    const names = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+    const days =
+      Array.isArray(job.days) && job.days.length
+        ? [...new Set(job.days)].sort((a, b) => a - b)
+        : [0, 1, 2, 3, 4, 5, 6];
+    if (days.length === 7) return t("everyDay");
+    return days
+      .filter((day) => names[day])
+      .map((day) => t(names[day]))
+      .join(" ");
   }
   function renderDevices() {
     $("#device-list").replaceChildren(
@@ -1795,11 +1816,19 @@
   $("#new-schedule").addEventListener("click", () => {
     if (!s.cameras.length) return toast(t("noCamera"), true);
     options($("#schedule-camera"));
+    $$("#schedule-form input[name=days]").forEach((input) => {
+      input.checked = true;
+    });
     $("#schedule-dialog").showModal();
   });
   $("#schedule-form").addEventListener("submit", (e) => {
     e.preventDefault();
-    const payload = Object.fromEntries(new FormData(e.currentTarget));
+    const form = e.currentTarget;
+    const payload = Object.fromEntries(new FormData(form));
+    delete payload.days;
+    payload.days = [...form.querySelectorAll("input[name=days]:checked")].map(
+      (input) => Number(input.value),
+    );
     for (const key of [
       "interval_seconds",
       "duration_seconds",

@@ -228,3 +228,13 @@ class Schedule(StrictModel):
         except ZoneInfoNotFoundError as exc:
             raise ValueError("Unknown IANA timezone") from exc
         return value
+
+    @model_validator(mode="after")
+    def recording_fits_interval(self, info):
+        # Stored rows may predate this rule. The scheduler still runs them and
+        # postpones an overlapping take instead of rejecting the saved rule.
+        if info.context and info.context.get("allow_overlap"):
+            return self
+        if self.action == "record" and self.duration_seconds >= self.interval_seconds:
+            raise ValueError("Recording duration must be shorter than the schedule interval")
+        return self
