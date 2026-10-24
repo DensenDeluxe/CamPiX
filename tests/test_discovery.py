@@ -143,3 +143,4 @@ def test_home_assistant_component_parses():
     assert "stream_source" in combined
     assert "Authorization" in combined
     assert "import requests" not in combined
+    assert "CookieJar(unsafe=True)" in (root / "config_flow.py").read_text(encoding="utf-8")

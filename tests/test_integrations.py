@@ -23,6 +23,17 @@ def _without_session(client):
     client.headers.pop("X-CSRF-Token", None)
 
 
+def test_pairing_requires_the_session_cookie(client):
+    signed_in = signin(client)
+    client.cookies.clear()
+    denied = client.post(
+        "/api/v1/integrations/homeassistant/pair",
+        headers={"X-CSRF-Token": signed_in["csrf"]},
+        json={"name": "Home Assistant"},
+    )
+    assert denied.status_code == 401
+
+
 def test_home_assistant_pairs_a_viewer_and_hides_camera_urls(client, application):
     signin(client)
     _online(client)
