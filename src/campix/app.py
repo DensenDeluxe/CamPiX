@@ -23,6 +23,7 @@ from .config import Settings
 from .db import Database
 from .events import EventBus
 from .exports import ExportService
+from .mdns import DiscoveryAnnouncer, advertise_ipv4, discovery_id
 from .media import MediaStore, StorageError
 from .mediamtx import MediaPlane
 from .models import (
@@ -40,7 +41,7 @@ from .notify import MailChannel, NotificationService, NotificationSettings, Webh
 from .process_lock import ProcessLock
 from .runtime import CameraManager
 from .scheduler import Scheduler
-from .security import Auth, digest
+from .security import Auth, TokenError, digest
 from .system import Telemetry
 
 LOG = logging.getLogger(__name__)
@@ -78,6 +79,10 @@ def _metric(name, value, labels=""):
     if isinstance(value, float):
         value = f"{value:.4f}"
     return f"{name}{labels} {value}"
+
+
+class IntegrationPair(StrictModel):
+    name: str = Field("Home Assistant", min_length=1, max_length=40)
 
 
 class MediaLock(StrictModel):
@@ -119,11 +124,20 @@ def create_app(settings: Settings | None = None):
 
     @asynccontextmanager
     async def lifespan(app):
+        announcer = None
         try:
             process_lock.acquire()
         except BaseException:
             db.close()
             raise
+        if settings.mdns:
+            announcer = DiscoveryAnnouncer(
+                settings.port,
+                __version__,
+                discovery_id(db),
+                advertise_ipv4(settings.host),
+            )
+            announcer.start()
         bus.start()
         try:
             store.reconcile()
@@ -135,6 +149,8 @@ def create_app(settings: Settings | None = None):
             bus.publish("system.started", "CamPiX service started")
             yield
         finally:
+            if announcer is not None:
+                await asyncio.to_thread(announcer.stop)
             await asyncio.to_thread(scheduler.stop)
             await asyncio.to_thread(exports.stop)
             await asyncio.to_thread(media_plane.stop)
@@ -260,6 +276,7 @@ def create_app(settings: Settings | None = None):
             Schedule,
             TimelapseRequest,
             UserCreate,
+            IntegrationPair,
             MediaLock,
             UserPatch,
             StorageSettings,
@@ -282,6 +299,7 @@ def create_app(settings: Settings | None = None):
             "Each snapshot may be selected once",
             "days must contain distinct weekday numbers 0–6",
             "Unknown IANA timezone",
+            "Recording duration must be shorter than the schedule interval",
             "Motion region must stay inside the frame",
             "Motion mask must be empty or 144 characters of 0 and 1",
             "Motion mask must leave at least one cell active",
@@ -403,9 +421,9 @@ def create_app(settings: Settings | None = None):
 
     @app.post("/api/v1/auth/logout", dependencies=[Depends(viewer)])
     def logout(request: Request):
-        db.execute(
-            "DELETE FROM sessions WHERE token=?", (digest(request.cookies["campix_session"]),)
-        )
+        token = request.cookies.get("campix_session")
+        if token:
+            db.execute("DELETE FROM sessions WHERE token=?", (digest(token),))
         response = JSONResponse({"ok": True})
         response.delete_cookie(
             "campix_session",
@@ -528,13 +546,28 @@ def create_app(settings: Settings | None = None):
         finally:
             preview_slots.release(camera_id)
 
-    async def mjpeg(camera_id, token):
+    def stream_credential(request: Request):
+        cookie = request.cookies.get("campix_session")
+        if auth.session(cookie):
+            return ("session", cookie)
+        header = request.headers.get("authorization")
+        if auth.tokens.authenticate(header):
+            return ("bearer", header)
+        raise HTTPException(401, "Sign in required")
+
+    def credential_alive(credential) -> bool:
+        kind, value = credential
+        if kind == "session":
+            return bool(auth.session(value))
+        return bool(auth.tokens.authenticate(value))
+
+    async def mjpeg(camera_id, credential):
         if not preview_slots.acquire(camera_id):
             raise HTTPException(429, "Too many live preview readers", headers={"Retry-After": "1"})
         camera = cameras.get(camera_id)
         sequence = -1
         try:
-            while auth.session(token):
+            while credential_alive(credential):
                 try:
                     current, frame = await asyncio.to_thread(camera.frame, sequence, 3)
                 except CaptureError:
@@ -572,9 +605,10 @@ def create_app(settings: Settings | None = None):
 
     @app.get("/api/v1/cameras/{camera_id}/stream.mjpg", dependencies=[Depends(viewer)])
     def stream(camera_id: str, request: Request):
+        credential = stream_credential(request)
         cameras.get(camera_id).frame()
         return StreamingResponse(
-            mjpeg(camera_id, request.cookies["campix_session"]),
+            mjpeg(camera_id, credential),
             media_type="multipart/x-mixed-replace; boundary=frame",
         )
 
@@ -690,6 +724,49 @@ def create_app(settings: Settings | None = None):
         secret = notifications.rotate_secret()
         bus.publish("settings.saved", "Notification signing secret rotated")
         return {"secret": secret}
+
+    @app.post("/api/v1/integrations/homeassistant/pair", dependencies=[Depends(admin)])
+    def pair_home_assistant(payload: IntegrationPair):
+        try:
+            token, public = auth.tokens.issue(payload.name)
+        except TokenError as exc:
+            raise HTTPException(exc.status, str(exc)) from exc
+        bus.publish("integration.paired", "Home Assistant paired", data={"token_id": public["id"]})
+        return {"token": token, "token_id": public["id"], "role": "viewer"}
+
+    @app.get("/api/v1/integrations/tokens", dependencies=[Depends(admin)])
+    def integration_tokens():
+        return auth.tokens.public()
+
+    @app.delete("/api/v1/integrations/tokens/{token_id}", dependencies=[Depends(admin)])
+    def revoke_integration_token(token_id: str):
+        if not auth.tokens.revoke(token_id):
+            raise KeyError(token_id)
+        bus.publish("integration.revoked", "API token revoked", data={"token_id": token_id})
+        return {"ok": True}
+
+    @app.get("/api/v1/integrations/homeassistant", dependencies=[Depends(viewer)])
+    def home_assistant_catalog():
+        service_id = discovery_id(db)
+        listed = []
+        for item in cameras.list():
+            camera_id = item["id"]
+            listed.append(
+                {
+                    "id": camera_id,
+                    "name": item["name"],
+                    "unique_id": f"campix:{camera_id}",
+                    "still_path": f"/api/v1/cameras/{camera_id}/preview.jpg?view=live",
+                    "mjpeg_path": f"/api/v1/cameras/{camera_id}/stream.mjpg",
+                    "online": item["status"] == "online",
+                }
+            )
+        return {
+            "version": __version__,
+            "service": f"CamPiX-{service_id}",
+            "service_id": service_id,
+            "cameras": listed,
+        }
 
     @app.get("/api/v1/export", dependencies=[Depends(admin)])
     def export():
