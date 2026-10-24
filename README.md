@@ -27,7 +27,8 @@ The familiar camera-appliance workflow should not depend on an obsolete camera s
 - **Motion:** a slow background model absorbs lighting changes. A 16×9 ignore mask drops permanently busy cells, and normalized regions still limit the score.
 - **Media library:** playback, authenticated downloads, locking, deletion, retention rules, storage-reserve protection, filename search across the whole library, and queued timelapse exports.
 - **Camera management:** multiple profiles and controls discovered from the selected adapter, rather than invented hardware support.
-- **Schedules:** persistent interval jobs with time windows, weekdays, and time zones.
+- **Schedules:** persistent interval jobs with time windows, weekdays, and time zones. Pausing a rule keeps its next run. A recording has to finish before the next interval.
+- **Home Assistant:** `campixd serve` announces the service on the local network. After one administrator sign-in, the [custom component](docs/DEPLOYMENT.md#home-assistant) adds and removes camera entities from the live catalog. The password is not stored in Home Assistant.
 - **Authenticated control plane:** FastAPI, REST/OpenAPI, WebSocket events, SQLite, system metrics, Argon2id passwords, viewer/operator/admin roles, CSRF protection, and revocable sessions.
 - **Optional media server:** supervised, version-pinned MediaMTX for RTSP publishing and authenticated WebRTC/HLS access, with a latest-frame JPEG fallback.
 - **Notifications:** a fixed catalog — motion, stalled capture, storage reserve, and failed export — can be delivered as a signed webhook or as local SMTP mail. No macros or custom commands.
