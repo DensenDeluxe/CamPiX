@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import re
 import secrets
 import threading
 import time
@@ -39,10 +41,134 @@ class RateLimiter:
             times.append(now)
 
 
+class TokenError(RuntimeError):
+    def __init__(self, message, status=409):
+        super().__init__(message)
+        self.status = status
+
+
+class ApiTokens:
+    """Revocable viewer tokens for integrations. Only the SHA-256 digest is stored."""
+
+    limit = 8
+
+    def __init__(self, db):
+        self.db = db
+
+    def issue(self, name: str):
+        cleaned = " ".join(str(name).split())
+        if not cleaned or len(cleaned) > 40:
+            raise TokenError("API token name is not allowed", 422)
+        token = "cx_" + secrets.token_urlsafe(32)
+        record = {
+            "id": secrets.token_hex(8),
+            "name": cleaned,
+            "digest": digest(token),
+            "role": "viewer",
+            "created": time.time(),
+        }
+        with self.db.transaction() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            items = [item for item in self._read(conn) if self._valid(item)]
+            if len(items) >= self.limit:
+                raise TokenError("API token limit reached")
+            items.append(record)
+            self._write(conn, items)
+        return token, self._public(record)
+
+    def revoke(self, token_id: str) -> bool:
+        if not isinstance(token_id, str) or not re.fullmatch(r"[a-f0-9]{16}", token_id):
+            return False
+        with self.db.transaction() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            items = self._read(conn)
+            kept = []
+            found = False
+            for item in items:
+                if isinstance(item, dict) and item.get("id") == token_id:
+                    found = True
+                    continue
+                kept.append(item)
+            if found:
+                self._write(conn, kept)
+            return found
+
+    def public(self):
+        return [self._public(item) for item in self._load()]
+
+    def authenticate(self, header):
+        if not isinstance(header, str) or not header or len(header) > 256:
+            return None
+        scheme, separator, value = header.partition(" ")
+        if separator != " " or scheme.lower() != "bearer" or value != value.strip():
+            return None
+        if not value.startswith("cx_") or len(value) > 128:
+            return None
+        hashed = digest(value)
+        for item in self._load():
+            if secrets.compare_digest(item["digest"], hashed):
+                return {
+                    "id": "token:" + item["id"],
+                    "username": item["name"],
+                    "role": "viewer",
+                    "csrf": "",
+                }
+        return None
+
+    def _load(self):
+        raw = self.db.setting("api_tokens", [])
+        if not isinstance(raw, list):
+            return []
+        return [item for item in raw if self._valid(item)]
+
+    def _read(self, conn):
+        row = conn.execute("SELECT value FROM settings WHERE key='api_tokens'").fetchone()
+        if not row:
+            return []
+        try:
+            raw = json.loads(row["value"])
+        except json.JSONDecodeError as exc:
+            raise TokenError("API tokens are unreadable") from exc
+        if not isinstance(raw, list):
+            raise TokenError("API tokens are unreadable")
+        return raw
+
+    def _write(self, conn, items):
+        conn.execute(
+            "INSERT INTO settings VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            ("api_tokens", json.dumps(items)),
+        )
+
+    def _valid(self, item) -> bool:
+        if not isinstance(item, dict):
+            return False
+        created = item.get("created")
+        return bool(
+            item.get("role") == "viewer"
+            and isinstance(item.get("id"), str)
+            and re.fullmatch(r"[a-f0-9]{16}", item["id"])
+            and isinstance(item.get("name"), str)
+            and 1 <= len(item["name"]) <= 40
+            and isinstance(item.get("digest"), str)
+            and re.fullmatch(r"[a-f0-9]{64}", item["digest"])
+            and isinstance(created, (int, float))
+            and not isinstance(created, bool)
+        )
+
+    def _public(self, item):
+        return {
+            "id": item["id"],
+            "name": item["name"],
+            "role": "viewer",
+            "created": item["created"],
+        }
+
+
 class Auth:
     def __init__(self, db, settings):
         self.db, self.settings = db, settings
         self.limiter = RateLimiter()
+        self.tokens = ApiTokens(db)
 
     def create_user(self, username, password, role="admin"):
         from .models import UserCreate
@@ -108,14 +234,21 @@ class Auth:
 
     def require(self, request: Request, role="viewer"):
         session = self.session(request.cookies.get("campix_session"))
-        if not session:
+        # A bearer token is not a cookie, so it cannot ride a browser form.
+        # A valid session still wins and keeps the CSRF check.
+        bearer = None if session else self.tokens.authenticate(request.headers.get("authorization"))
+        principal = session or bearer
+        if not principal:
             raise HTTPException(401, "Sign in required")
-        if ROLES[session["role"]] < ROLES[role]:
+        if ROLES[principal["role"]] < ROLES[role]:
             raise HTTPException(403, "Insufficient permissions")
         if request.method not in {"GET", "HEAD", "OPTIONS"}:
-            if not self.origin_allowed(request.headers.get("origin"), request.url):
-                raise HTTPException(403, "Cross-site request rejected")
-            if not secrets.compare_digest(request.headers.get("x-csrf-token", ""), session["csrf"]):
-                raise HTTPException(403, "Invalid CSRF token")
-            self.limiter.check("writes:" + str(session["id"]), 120, 60)
-        return session
+            if session:
+                if not self.origin_allowed(request.headers.get("origin"), request.url):
+                    raise HTTPException(403, "Cross-site request rejected")
+                if not secrets.compare_digest(
+                    request.headers.get("x-csrf-token", ""), session["csrf"]
+                ):
+                    raise HTTPException(403, "Invalid CSRF token")
+            self.limiter.check("writes:" + str(principal["id"]), 120, 60)
+        return principal

@@ -775,3 +775,103 @@ def test_native_uvc_batch_read_preserves_real_five_fps_source_pts(tmp_path, real
         assert backend.native_preview.hub.stats()["published_frames"] == 11
     finally:
         backend.native_preview.close()
+
+
+def test_stalled_picamera_read_is_closed_without_deadlock(monkeypatch):
+    picamera_modules(monkeypatch, hardware=False)
+    entered = threading.Event()
+
+    class Blocking(FakePicamera):
+        def capture_image(self, name):
+            entered.set()
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and not self.stopped and not self.closed:
+                time.sleep(0.01)
+            if not (self.stopped or self.closed):
+                raise AssertionError("stuck Picamera2 read was not closed")
+            raise RuntimeError("closed")
+
+    sys.modules["picamera2"].Picamera2 = Blocking
+    backend = capture.make_backend(config(), "ffmpeg")
+    backend.stall_seconds = 0.2
+    backend.open()
+    errors = []
+
+    def run():
+        try:
+            backend.read()
+        except Exception as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    assert entered.wait(1)
+    worker.join(3)
+    assert not worker.is_alive()
+    assert errors
+    assert backend.cam.stopped or backend.cam.closed
+    backend.close()
+    assert not backend._watch.is_alive()
+
+
+def test_stalled_v4l2_read_releases_the_device_without_deadlock(monkeypatch):
+    created = []
+
+    class FakeCapture:
+        def __init__(self, source, api):
+            self.released = threading.Event()
+            self.entered = threading.Event()
+            created.append(self)
+
+        def isOpened(self):
+            return True
+
+        def set(self, *_args):
+            return True
+
+        def read(self):
+            self.entered.set()
+            self.released.wait(3)
+            return False, None
+
+        def release(self):
+            self.released.set()
+
+    class FakeCV:
+        CAP_V4L2 = 200
+        CAP_PROP_BUFFERSIZE = 1
+        CAP_PROP_FOURCC = 2
+        CAP_PROP_FRAME_WIDTH = 3
+        CAP_PROP_FRAME_HEIGHT = 4
+        CAP_PROP_FPS = 5
+        VideoCapture = FakeCapture
+
+        @staticmethod
+        def VideoWriter_fourcc(*_args):
+            return 0
+
+    monkeypatch.setitem(sys.modules, "cv2", FakeCV)
+    monkeypatch.setattr(capture.V4L2CompressedBackend, "native_modes", lambda self: None)
+    monkeypatch.setattr(capture.V4L2Backend, "_load_controls", lambda self: None)
+    backend = capture.make_backend(
+        CameraConfig(id="usb", name="USB", backend="v4l2", source="/dev/video42"), "ffmpeg"
+    )
+    backend.stall_seconds = 0.2
+    backend.open()
+    assert backend.pipe is None
+    errors = []
+
+    def run():
+        try:
+            backend.read()
+        except capture.CaptureError as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    assert created[0].entered.wait(1)
+    worker.join(3)
+    assert created[0].released.is_set()
+    assert errors
+    backend.close()
+    assert not backend._watch.is_alive()

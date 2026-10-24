@@ -192,6 +192,24 @@ For a portable installation, add the equivalent fields to the existing `campix.j
 
 Replace the placeholder with the actual origin and restart the managed service. Forwarded headers are accepted only from loopback proxies. The CLI rejects public/LAN HTTP origins without secure cookies. The supplied loopback setup uses HTTP only locally. Internet exposure additionally needs a firewall, certificate operations, host patching, and a reviewed media-network configuration.
 
+## Home Assistant
+
+CamPiX can appear in Home Assistant without a separate YAML camera for each device.
+
+1. Run `campixd serve` on an address Home Assistant can reach. Discovery is on unless `CAMPIX_MDNS=false` or the configuration file contains `"mdns": false`. A program that calls `create_app` directly does not announce unless `mdns` is true.
+2. Copy `homeassistant/custom_components/campix` to Home Assistant's `config/custom_components/campix` directory. Restart Home Assistant.
+3. When Home Assistant finds `_campix._tcp`, open the discovered service and enter the CamPiX administrator username and password once. The same form can be opened manually with a host, port, and HTTPS checkbox.
+4. CamPiX creates one revocable viewer token and gives it to Home Assistant. The administrator password is not stored in Home Assistant. Home Assistant then creates one camera entity for each CamPiX camera. The entity id includes the CamPiX service id, so another CamPiX service can use the same camera id. Added and removed cameras follow the catalog about every 10 seconds.
+5. Still images and the live view inside Home Assistant send that token. Home Assistant cannot attach the token to its own stream URL, so the integration proxies MJPEG instead of publishing a camera URL.
+
+The announcement contains the service id, CamPiX version, and catalog path. It does not contain camera URLs, passwords, or tokens. The catalog contains the camera id, name, online state, and the still and MJPEG paths. A network camera's source URL stays on CamPiX.
+
+List tokens with `GET /api/v1/integrations/tokens` and revoke one with `DELETE /api/v1/integrations/tokens/{token_id}`. There are at most eight tokens. Configuration export omits them. A database backup still contains the token digest, as it contains password hashes. The raw token remains only in Home Assistant. After a revoke, Home Assistant asks for the administrator again.
+
+Discovery advertises the address CamPiX is listening on. A listener on all interfaces advertises one private IPv4 address on that host. Link-local and metadata addresses are not advertised. A reverse-proxy name is not guessed; type that name into the Home Assistant form when HTTPS uses a certificate for it. Enable HTTPS in the form when CamPiX uses secure cookies. UDP port 5353 is required for discovery. If it cannot be opened, CamPiX logs that discovery is off and keeps serving.
+
+This path is not ONVIF. A discovered service or an `online` catalog flag does not qualify a physical camera. A synthetic demo camera can be online.
+
 ## Optional MediaMTX
 
 ```powershell
@@ -240,7 +258,8 @@ The Dockerfile's default `PYTHON_IMAGE` is digest-pinned. If overriding it, use 
 - **Restore:** stop the service and restore matching database and media backups into a new private data directory. Verify `campix` ownership and `0700`/`0600` permissions before starting. Never copy an old database over an active WAL database.
 - **Account recovery:** run `sudo -u campix campixd --config /etc/campix/campix.json reset-password admin`. All sessions for that account are revoked. This requires existing access to the private data directory.
 - **Updates:** back up first. Schema 1 and 2 migrate to 3 by adding the notification outbox; downgrading an unknown newer schema is blocked. A schema 3 database does not open in an older CamPiX release, so roll back with the database backup taken before this migration and a matching application version. The one-command installer does not update an existing deployment. Native updates use a reviewed matching `.deb` package; portable updates require review of the release environment and its startup paths. Package removal retains media and accounts.
-- **Notifications:** an administrator can enable a signed HTTPS webhook, or HTTP on loopback, and local SMTP on `127.0.0.1`. Only motion, a stalled camera, the storage reserve, and a failed export are sent. The signing secret is shown in the admin settings and is not part of the configuration export. Receivers should reject timestamps more than five minutes from the current time and signatures that do not match `timestamp + "." + body`.
+- **Notifications:** an administrator can enable a signed HTTPS webhook, or HTTP on loopback, and local SMTP on `127.0.0.1`. Only motion, a stalled camera, the storage reserve, and a failed export are sent. The signing secret is shown in the admin settings and is not part of the configuration export. Receivers should reject timestamps more than five minutes from the current time and signatures that do not match `timestamp + "." + body`. If the webhook name has more than one allowed address, CamPiX tries the next address after a connection failure. An HTTP error response ends that attempt.
+- **Schedules:** the schedule form selects weekdays. Pausing or editing a rule keeps the next run when the interval stays the same. A recording must be shorter than its interval. An overlapping take is skipped until it should have finished, instead of recording an error on every interval.
 - **Audio:** leave audio off unless the camera profile should record it. Synthetic audio is a generated tone. DirectShow needs a separate audio device name. Linux ALSA accepts `default`, `hw:N`, or `plughw:N,M`. Network profiles use the camera URL's audio track. A recording with audio is listed only after both tracks finalize.
 - **Monitoring:** `/healthz` checks HTTP liveness. Use authenticated `/api/v1/system`, camera frame age, `scheduler_alive`, MediaMTX readiness, and `/metrics` for operational monitoring. A green HTTP check does not qualify an offline camera.
 

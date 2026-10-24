@@ -83,6 +83,8 @@ def test_snapshot_media_lock_delete_and_path_boundary(client):
     assert image.size == (640, 360)
     assert image.format == "JPEG"
     assert client.patch(f"/api/v1/media/{item['id']}", json={"locked": True}).status_code == 200
+    listed = client.get("/api/v1/media").json()["items"][0]
+    assert listed["locked"] is True
     assert client.delete(f"/api/v1/media/{item['id']}").status_code == 409
     assert client.get("/api/v1/media/../../campix.sqlite3/file").status_code == 404
     client.patch(f"/api/v1/media/{item['id']}", json={"locked": False})
@@ -150,6 +152,131 @@ def test_scheduler_claims_once_and_survives_restart(client, application):
     application.state.scheduler.tick()
     assert client.get("/api/v1/media").json()["total"] == 1
     assert client.get("/api/v1/schedules").json()[0]["next_run"] > time.time()
+
+
+def _quiet_scheduler(application):
+    application.state.scheduler.halt.set()
+    application.state.scheduler.thread.join(timeout=2)
+
+
+def test_schedule_edits_keep_next_run_and_weekdays(client, application):
+    signin(client)
+    _quiet_scheduler(application)
+    created = client.post(
+        "/api/v1/schedules",
+        json={
+            "id": "week",
+            "name": "Week",
+            "camera_id": "demo",
+            "days": [0, 2, 4],
+            "interval_seconds": 3600,
+        },
+    )
+    assert created.status_code == 201, created.text
+    body = created.json()
+    original = body["next_run"]
+    assert body["days"] == [0, 2, 4]
+    paused = client.post(
+        "/api/v1/schedules",
+        json={key: value for key, value in body.items() if key != "next_run"}
+        | {"enabled": False, "name": "Paused"},
+    )
+    assert paused.status_code == 201, paused.text
+    assert paused.json()["next_run"] == original
+    changed = client.post(
+        "/api/v1/schedules",
+        json={key: value for key, value in paused.json().items() if key != "next_run"}
+        | {"interval_seconds": 120},
+    )
+    assert changed.status_code == 201, changed.text
+    assert changed.json()["next_run"] > time.time() + 60
+    assert changed.json()["next_run"] != original
+    application.state.db.execute("UPDATE schedules SET next_run=? WHERE id='week'", (time.time() - 30,))
+    stored = client.get("/api/v1/schedules").json()[0]
+    resumed = client.post(
+        "/api/v1/schedules",
+        json={key: value for key, value in stored.items() if key != "next_run"} | {"enabled": True},
+    )
+    assert resumed.status_code == 201, resumed.text
+    assert resumed.json()["enabled"] is True
+    assert resumed.json()["next_run"] <= time.time() + 1
+    rejected = client.post(
+        "/api/v1/schedules",
+        json={
+            "id": "long",
+            "name": "Long",
+            "camera_id": "demo",
+            "action": "record",
+            "interval_seconds": 30,
+            "duration_seconds": 30,
+        },
+    )
+    assert rejected.status_code == 422
+    assert "Recording duration must be shorter than the schedule interval" in rejected.text
+
+
+def test_overlapping_recording_is_skipped_until_the_take_can_finish(client, application):
+    from campix.capture import CaptureError
+
+    signin(client)
+    _quiet_scheduler(application)
+    saved = client.post(
+        "/api/v1/schedules",
+        json={
+            "id": "rec",
+            "name": "Rec",
+            "camera_id": "demo",
+            "action": "record",
+            "interval_seconds": 60,
+            "duration_seconds": 30,
+        },
+    )
+    assert saved.status_code == 201, saved.text
+    camera = application.state.cameras.get("demo")
+
+    def busy(*_args, **_kwargs):
+        raise CaptureError("A recording is already in progress")
+
+    camera.start_recording = busy
+    application.state.db.execute(
+        "UPDATE schedules SET next_run=? WHERE id='rec'", (time.time() - 1,)
+    )
+    application.state.scheduler.tick()
+    application.state.scheduler.tick()
+    application.state.db.execute(
+        "INSERT INTO schedules VALUES (?,?,?)",
+        (
+            "legacy",
+            json.dumps(
+                {
+                    "id": "legacy",
+                    "name": "Legacy",
+                    "camera_id": "demo",
+                    "action": "record",
+                    "interval_seconds": 5,
+                    "duration_seconds": 30,
+                    "enabled": True,
+                    "days": [0, 1, 2, 3, 4, 5, 6],
+                    "start_hour": 0,
+                    "end_hour": 24,
+                    "timezone": "Europe/Berlin",
+                }
+            ),
+            time.time() - 1,
+        ),
+    )
+    before = time.time()
+    application.state.scheduler.tick()
+    application.state.scheduler.tick()
+    kinds = [
+        row["kind"]
+        for row in application.state.db.all(
+            "SELECT kind FROM events WHERE kind LIKE 'schedule.%' ORDER BY id"
+        )
+    ]
+    assert kinds == ["schedule.skipped", "schedule.skipped"]
+    legacy = application.state.db.one("SELECT next_run FROM schedules WHERE id='legacy'")["next_run"]
+    assert legacy >= before + 29
 
 
 def test_overnight_window_uses_previous_weekday():
