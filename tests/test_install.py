@@ -68,6 +68,7 @@ def test_os_release_is_data_and_does_not_execute_host_input(installer, tmp_path)
 def test_native_camera_packages_require_detected_pi(installer, host):
     generic = installer.install_plan(host)
     assert generic["profile"] == "native-debian"
+    assert generic["listener"] == "0.0.0.0:8080"
     assert "python3-picamera2" not in generic["packages"]
     pi = replace(host, board="Raspberry Pi 5", raspberry_pi=True, sensors=("imx500",))
     plan = installer.install_plan(pi)

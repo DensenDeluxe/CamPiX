@@ -81,13 +81,15 @@ async def async_pair(host, port, tls, username, password, revoke_id=None, revoke
                 json={"username": username, "password": password},
             ) as response:
                 if response.status == 401:
+                    _LOGGER.warning("CamPiX at %s rejected the administrator login", base)
                     raise InvalidAuth
                 if response.status != 200:
-                    _LOGGER.warning("CamPiX login returned HTTP %s", response.status)
+                    _LOGGER.warning("CamPiX login at %s returned HTTP %s", base, response.status)
                     raise CannotConnect
                 payload = await response.json(content_type=None)
                 secure_cookie = _secure_session_cookie(response)
         except aiohttp.ClientError as exc:
+            _LOGGER.warning("CamPiX at %s could not be reached: %s", base, exc)
             raise CannotConnect from exc
         if secure_cookie and not tls:
             _LOGGER.warning("CamPiX session cookie is Secure and the form is using HTTP")

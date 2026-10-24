@@ -226,7 +226,7 @@ def install_plan(host: Host, without_mediamtx: bool = False) -> dict:
         "packages": packages,
         "uv": {"version": UV_VERSION, "asset": asset},
         "mediamtx": None if without_mediamtx else MEDIAMTX_VERSION,
-        "listener": "127.0.0.1:8080",
+        "listener": "0.0.0.0:8080",
         "hardware_qualified": False,
         "problems": problems,
         "notes": [
@@ -1037,7 +1037,7 @@ def portable_install(
     )
     config = {
         "data_dir": str(root / "data"),
-        "host": "127.0.0.1",
+        "host": "0.0.0.0",
         "demo": False,
         "ffmpeg": str(ffmpeg),
     }
@@ -1271,7 +1271,9 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(result, indent=2))
         else:
             print(f"CamPiX installed. Configuration: {result['config']}")
-            print("Open http://127.0.0.1:8080 locally; use an SSH tunnel for another computer.")
+            print(
+                "Open http://127.0.0.1:8080 on this machine, or the machine's private address from the home LAN."
+            )
             print("Manage CamPiX with: campix start | stop | status | update | repair | uninstall")
             if not result["command_on_path"]:
                 folder = Path(result["command"]).parent

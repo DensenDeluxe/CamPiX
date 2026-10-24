@@ -22,7 +22,7 @@
       }
     },
     "error": {
-      "cannot_connect": "CamPiX did not respond. Check the address, port, and HTTPS.",
+      "cannot_connect": "CamPiX did not respond. Check the address, port, and HTTPS. The Home Assistant log records the address and the connection error.",
       "invalid_auth": "The administrator username or password was rejected.",
       "pair_failed": "CamPiX accepted the password but did not keep the session. Enable HTTPS when secure cookies are on.",
       "too_many_tokens": "CamPiX already has eight API tokens. Revoke one, then try again."

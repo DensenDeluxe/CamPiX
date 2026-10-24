@@ -14,6 +14,27 @@ from .db import Database
 from .security import Auth
 
 
+def listener_error(settings) -> str | None:
+    """Reject public HTTP listeners. A private address may serve the home LAN."""
+    from urllib.parse import urlsplit
+
+    from .config import home_lan_host
+
+    loopback = {"127.0.0.1", "localhost", "::1"}
+    if settings.public_origin:
+        origin = urlsplit(settings.public_origin)
+        if origin.hostname not in loopback and (
+            origin.scheme != "https" or not settings.secure_cookies
+        ):
+            return "A public origin requires HTTPS and CAMPIX_SECURE_COOKIES=true"
+        return None
+    if settings.host in loopback | {"0.0.0.0", "::"} or home_lan_host(settings.host):
+        if settings.secure_cookies and settings.host not in loopback:
+            return "Secure cookies on a LAN listener require HTTPS and CAMPIX_PUBLIC_ORIGIN"
+        return None
+    return "A public listener requires CAMPIX_PUBLIC_ORIGIN and a TLS proxy"
+
+
 def serve_advertises(settings, config_path) -> bool:
     """Announce on the LAN unless discovery was explicitly disabled."""
     if "CAMPIX_MDNS" in os.environ:
@@ -144,23 +165,20 @@ def main():
         check.close()
         if not ready:
             parser.error("Create an administrator first: campixd init-admin")
-        if settings.host not in {"127.0.0.1", "localhost", "::1"} and not settings.public_origin:
-            parser.error(
-                "A non-loopback listener requires CAMPIX_PUBLIC_ORIGIN (and a TLS proxy for production)"
-            )
-        if settings.public_origin:
-            from urllib.parse import urlsplit
-
-            origin = urlsplit(settings.public_origin)
-            if origin.hostname not in {"localhost", "127.0.0.1", "::1"} and (
-                origin.scheme != "https" or not settings.secure_cookies
-            ):
-                parser.error("A public/LAN origin requires HTTPS and CAMPIX_SECURE_COOKIES=true")
+        message = listener_error(settings)
+        if message:
+            parser.error(message)
         logging.basicConfig(
             level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s"
         )
         # The media-plane supervisor polls MediaMTX every two seconds; log only problems.
         logging.getLogger("httpx").setLevel(logging.WARNING)
+        if settings.host not in {"127.0.0.1", "localhost", "::1"} and not settings.public_origin:
+            logging.getLogger("campix.service").warning(
+                "Serving HTTP on %s:%s for a private network. Do not publish this port.",
+                settings.host,
+                settings.port,
+            )
         from . import processes
 
         try:

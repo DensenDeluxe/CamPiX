@@ -160,7 +160,7 @@ systemctl status campix
 journalctl -u campix -f
 ```
 
-The package does not perform network pip installation as root and does not start with a default account. The service runs as `campix`, with a private state directory, filesystem restrictions, and access through the `video` and, where appropriate, `render` groups. Verify device groups and required CSI device nodes on the actual host. The initial listener is `127.0.0.1:8080`; use an SSH tunnel for a test from another computer:
+The package does not perform network pip installation as root and does not start with a default account. The service runs as `campix`, with a private state directory, filesystem restrictions, and access through the `video` and, where appropriate, `render` groups. Verify device groups and required CSI device nodes on the actual host. The packaged listener is `0.0.0.0:8080`, so the service answers on the machine's private addresses and on `127.0.0.1`. An existing configuration that still says `127.0.0.1` answers only on that machine. Use an SSH tunnel when testing that older bind from another computer:
 
 ```sh
 ssh -L 8080:127.0.0.1:8080 user@camera-host
@@ -190,13 +190,13 @@ For a portable installation, add the equivalent fields to the existing `campix.j
 }
 ```
 
-Replace the placeholder with the actual origin and restart the managed service. Forwarded headers are accepted only from loopback proxies. The CLI rejects public/LAN HTTP origins without secure cookies. The supplied loopback setup uses HTTP only locally. Internet exposure additionally needs a firewall, certificate operations, host patching, and a reviewed media-network configuration.
+Replace the placeholder with the actual origin and restart the managed service. Forwarded headers are accepted only from loopback proxies. A public origin requires HTTPS and secure cookies. A private bind (`"host": "0.0.0.0"` or a private IPv4 address) may serve HTTP on the home LAN when no public origin is set and secure cookies stay off. That listener accepts a private address in the Host header. An existing `/etc/campix/campix.json` is kept on package upgrade and still listens on `127.0.0.1` until that field is changed. Do not publish this port to the internet. Internet exposure additionally needs a firewall, certificate operations, host patching, and a reviewed media-network configuration.
 
 ## Home Assistant
 
 CamPiX can appear in Home Assistant without a separate YAML camera for each device.
 
-1. Run `campixd serve` on an address Home Assistant can reach. Discovery is on unless `CAMPIX_MDNS=false` or the configuration file contains `"mdns": false`. A program that calls `create_app` directly does not announce unless `mdns` is true.
+1. Run `campixd serve` on an address Home Assistant can reach. On an existing install, set `"host": "0.0.0.0"` in `/etc/campix/campix.json` and restart the service. Home Assistant then uses the machine's private IP and port 8080, with HTTPS left off. Discovery is on unless `CAMPIX_MDNS=false` or the configuration file contains `"mdns": false`. A program that calls `create_app` directly does not announce unless `mdns` is true.
 2. Install the component with HACS, then restart Home Assistant. Open HACS, choose Integrations, then Custom repositories, and add `https://github.com/DensenDeluxe/CamPiX` with category Integration. Download CamPiX. HACS reads `custom_components/campix` from the default branch of this repository. The same directory can be copied by hand into Home Assistant's `config/custom_components/campix`.
 3. When Home Assistant finds `_campix._tcp`, open the discovered service and enter the CamPiX administrator username and password once. The same form can be opened manually with a host, port, and HTTPS checkbox. The discovered host is an IP address, and pairing keeps the administrator session cookie for that address long enough to create the viewer token. Turn on HTTPS in the form when CamPiX uses secure cookies; the session cookie is then not sent over HTTP and pairing stops after the password is accepted.
 4. CamPiX creates one revocable viewer token and gives it to Home Assistant. The administrator password is not stored in Home Assistant. Home Assistant then creates one camera entity for each CamPiX camera. The entity id includes the CamPiX service id, so another CamPiX service can use the same camera id. Added and removed cameras follow the catalog about every 10 seconds.

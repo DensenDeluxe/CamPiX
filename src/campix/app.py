@@ -19,7 +19,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from . import __version__
 from .capture import CaptureError, discover
-from .config import Settings
+from .config import Settings, home_lan_host
 from .db import Database
 from .events import EventBus
 from .exports import ExportService
@@ -45,6 +45,18 @@ from .security import Auth, TokenError, digest
 from .system import Telemetry
 
 LOG = logging.getLogger(__name__)
+
+
+def request_hostname(value: str | None) -> str:
+    if not value:
+        return ""
+    value = value.strip().lower()
+    if value.startswith("["):
+        end = value.find("]")
+        return value[1:end] if end > 1 else ""
+    if value.count(":") == 1:
+        return value.split(":", 1)[0]
+    return value
 
 
 class StreamSlots:
@@ -197,9 +209,16 @@ def create_app(settings: Settings | None = None):
         app.add_middleware(
             TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "::1", "localhost", "testserver"]
         )
+    lan_http = not settings.public_origin and settings.host not in {
+        "127.0.0.1",
+        "::1",
+        "localhost",
+    }
 
     @app.middleware("http")
     async def boundary(request, call_next):
+        if lan_http and not home_lan_host(request_hostname(request.headers.get("host"))):
+            return JSONResponse({"detail": "Invalid host header"}, status_code=400)
         if request.method in {"POST", "PATCH", "PUT", "DELETE"}:
             if request.headers.get("sec-fetch-site") == "cross-site":
                 return JSONResponse({"detail": "Cross-site request rejected"}, status_code=403)
