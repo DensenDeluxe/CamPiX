@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 
 import aiohttp
@@ -10,6 +11,8 @@ from homeassistant import config_entries
 from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_PORT, CONF_USERNAME
 
 from .const import DEFAULT_PORT, DOMAIN
+
+_LOGGER = logging.getLogger(__name__)
 
 CONF_TLS = "tls"
 
@@ -65,7 +68,13 @@ async def async_pair(host, port, tls, username, password, revoke_id=None, revoke
     """
     base = f"{'https' if tls else 'http'}://{_format_host(host)}:{int(port)}"
     timeout = aiohttp.ClientTimeout(total=20)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
+    # Discovery fills in an IP address. aiohttp stores a cookie for an IP host
+    # only when the jar opts in; otherwise the session never returns and pairing
+    # stops after a correct password.
+    async with aiohttp.ClientSession(
+        timeout=timeout,
+        cookie_jar=aiohttp.CookieJar(unsafe=True),
+    ) as session:
         try:
             async with session.post(
                 f"{base}/api/v1/auth/login",
@@ -74,10 +83,15 @@ async def async_pair(host, port, tls, username, password, revoke_id=None, revoke
                 if response.status == 401:
                     raise InvalidAuth
                 if response.status != 200:
+                    _LOGGER.warning("CamPiX login returned HTTP %s", response.status)
                     raise CannotConnect
                 payload = await response.json(content_type=None)
+                secure_cookie = _secure_session_cookie(response)
         except aiohttp.ClientError as exc:
             raise CannotConnect from exc
+        if secure_cookie and not tls:
+            _LOGGER.warning("CamPiX session cookie is Secure and the form is using HTTP")
+            raise PairFailed
         csrf = payload.get("csrf") if isinstance(payload, dict) else None
         if not isinstance(csrf, str) or not csrf:
             raise CannotConnect
@@ -99,10 +113,12 @@ async def async_pair(host, port, tls, username, password, revoke_id=None, revoke
                 headers=headers,
             ) as response:
                 if response.status == 401:
+                    _LOGGER.warning("CamPiX accepted the password but rejected the session cookie")
                     raise PairFailed
                 if response.status == 409:
                     raise TooManyTokens
                 if response.status != 200:
+                    _LOGGER.warning("CamPiX pairing returned HTTP %s", response.status)
                     raise CannotConnect
                 paired = await response.json(content_type=None)
         except aiohttp.ClientError as exc:
@@ -144,6 +160,11 @@ async def async_pair(host, port, tls, username, password, revoke_id=None, revoke
             raise AlreadyConfigured
         await _logout(session, base, headers)
     return {"token": token, "token_id": token_id, "service_id": service_id}
+
+
+def _secure_session_cookie(response) -> bool:
+    cookie = response.cookies.get("campix_session")
+    return bool(cookie and cookie.get("secure"))
 
 
 async def _logout(session, base, headers):
