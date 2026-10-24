@@ -6,8 +6,8 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from campix.app import create_app
-from campix.cli import serve_advertises
-from campix.config import Settings
+from campix.cli import listener_error, serve_advertises
+from campix.config import Settings, home_lan_host
 from campix.db import Database
 from campix.mdns import (
     CATALOG_PATH,
@@ -74,6 +74,41 @@ def test_discovery_bind_failure_does_not_stop_the_service():
     announcer.start()
     assert announcer.sock is None
     announcer.stop()
+
+
+def test_private_lan_http_listener_is_allowed():
+    assert listener_error(Settings(host="127.0.0.1", min_free_mb=32)) is None
+    assert listener_error(Settings(host="0.0.0.0", min_free_mb=32)) is None
+    assert listener_error(Settings(host="192.168.178.143", min_free_mb=32)) is None
+    assert "PUBLIC_ORIGIN" in listener_error(Settings(host="8.8.8.8", min_free_mb=32))
+    assert "PUBLIC_ORIGIN" in listener_error(Settings(host="203.0.113.10", min_free_mb=32))
+    assert "HTTPS" in listener_error(Settings(host="0.0.0.0", secure_cookies=True, min_free_mb=32))
+    assert (
+        listener_error(
+            Settings(
+                host="0.0.0.0",
+                public_origin="https://cam.example",
+                secure_cookies=True,
+                min_free_mb=32,
+            )
+        )
+        is None
+    )
+    assert "HTTPS" in listener_error(Settings(public_origin="http://cam.example", min_free_mb=32))
+    assert home_lan_host("192.168.178.143")
+    assert home_lan_host("127.0.0.1")
+    assert not home_lan_host("8.8.8.8")
+    assert not home_lan_host("203.0.113.10")
+    assert not home_lan_host("cam.example")
+
+
+def test_private_listener_accepts_a_lan_address(tmp_path):
+    app = create_app(Settings(data_dir=tmp_path / "lan", host="0.0.0.0", min_free_mb=32))
+    with TestClient(app) as client:
+        allowed = client.get("/healthz", headers={"Host": "192.168.178.143:8080"})
+        assert allowed.status_code == 200, allowed.text
+        rejected = client.get("/healthz", headers={"Host": "8.8.8.8"})
+        assert rejected.status_code == 400
 
 
 def test_serve_announces_unless_discovery_is_disabled(tmp_path, monkeypatch):

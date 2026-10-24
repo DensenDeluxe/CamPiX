@@ -1,11 +1,33 @@
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import sys
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+_HOME_LAN_V4 = (
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+)
+_HOME_LAN_V6 = (ipaddress.ip_network("fc00::/7"),)
+
+
+def home_lan_host(hostname: str) -> bool:
+    """True for loopback and private home-network addresses, not documentation ranges."""
+    if hostname == "localhost":
+        return True
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        return False
+    if address.is_loopback:
+        return True
+    networks = _HOME_LAN_V4 if address.version == 4 else _HOME_LAN_V6
+    return any(address in network for network in networks)
 
 
 class Settings(BaseModel):
