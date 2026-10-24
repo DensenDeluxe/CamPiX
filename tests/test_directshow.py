@@ -463,6 +463,30 @@ def test_pipe_jpeg_quality_is_applied_once_to_the_ffmpeg_encoder(quality, quanti
     assert backend.codec_arguments() == ["-c:v", "mjpeg", "-q:v", quantizer]
 
 
+def test_shared_encoder_sink_does_not_probe_directshow_as_network_h264(monkeypatch):
+    """A USB open must not spend a second FFmpeg session on the RTSP H.264 probe."""
+    probes = []
+
+    def spy(self, timeout):
+        probes.append(self.command)
+        return False
+
+    monkeypatch.setattr(capture.H264CopySession, "start_matching", spy)
+    launched = launch(monkeypatch, jpeg())
+    backend = capture.make_backend(camera(), "ffmpeg")
+    backend.set_encoded_sink(lambda *args, **kwargs: None)
+    backend.open()
+    try:
+        assert backend.read().size == (640, 480)
+    finally:
+        backend.close()
+    assert probes == []
+    assert len(launched) == 1
+    command = launched[0][0]
+    assert command[command.index("-f") + 1] == "dshow"
+    assert "mpegts" not in command
+
+
 def test_directshow_backend_requests_a_native_mode_and_reduces_the_rate_first(monkeypatch):
     process = LiveFFmpeg()
     launched = launch(monkeypatch, process)

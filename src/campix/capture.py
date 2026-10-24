@@ -508,6 +508,8 @@ class V4L2Backend(Backend):
 
 class NetworkBackend(Backend):
     model = "Network camera"
+    # Same complete-frame budget as DirectShow. Trickling bytes do not reset it.
+    stall_seconds = 10
 
     def input_arguments(self):
         arguments = [
@@ -575,6 +577,7 @@ class NetworkBackend(Backend):
             session = H264CopySession(self, self.h264_copy_command())
             try:
                 if session.start_matching(timeout=2.5):
+                    session.start_watch()
                     self.copy_session = session
                     self.native_encoded = True
                     self.native_attempted = True
@@ -599,6 +602,7 @@ class NetworkBackend(Backend):
                 pass
             session.close()
         self._open_jpeg()
+        self._start_jpeg_watch()
 
     def _open_jpeg(self):
         video_filter = self.video_filter()
@@ -625,8 +629,32 @@ class NetworkBackend(Backend):
             creationflags=NO_WINDOW,
         )
         self.buffer = bytearray()
-        self.last_data = time.monotonic()
+        self.last_frame = time.monotonic()
         self.capabilities.update(model=self.model, controls=[], audio=False)
+
+    def _start_jpeg_watch(self):
+        self._jpeg_watch_stop = threading.Event()
+        self._jpeg_watch = threading.Thread(
+            target=self._watch_jpeg,
+            name=f"net-jpeg-watch-{self.config.id}",
+            daemon=True,
+        )
+        self._jpeg_watch.start()
+
+    def _watch_jpeg(self):
+        # FFmpeg -rw_timeout does not cover every demuxer that keeps the socket open.
+        # Killing the process turns a blocked read into the capture loop's normal reconnect.
+        while getattr(self, "proc", None) is not None and self.proc.poll() is None:
+            if self._jpeg_watch_stop.is_set():
+                return
+            if time.monotonic() - self.last_frame > self.stall_seconds:
+                try:
+                    self.proc.kill()
+                except OSError:
+                    if self.proc.poll() is None:
+                        raise
+                return
+            self._jpeg_watch_stop.wait(0.5)
 
     def _read_jpeg(self, process=None, buffer=None):
         process = process if process is not None else self.proc
@@ -650,7 +678,6 @@ class NetworkBackend(Backend):
             chunk = read(65536)
             if not chunk:
                 raise CaptureError(f"{self.model} is unavailable")
-            self.last_data = time.monotonic()
             buffer.extend(chunk)
             if len(buffer) > 16 * 1024 * 1024:
                 raise CaptureError(f"{self.model} frame exceeds the supported size")
@@ -661,7 +688,7 @@ class NetworkBackend(Backend):
             self.frame_received_at = self.copy_session.frame_received_at
             return jpeg
         jpeg = self._read_jpeg()
-        self.frame_received_at = time.monotonic()
+        self.last_frame = self.frame_received_at = time.monotonic()
         return jpeg
 
     def read(self):
@@ -674,10 +701,18 @@ class NetworkBackend(Backend):
             session.close()
             self.copy_session = None
             return
+        watch_stop = getattr(self, "_jpeg_watch_stop", None)
+        if watch_stop:
+            watch_stop.set()
         if hasattr(self, "proc"):
             terminate_process(self.proc)
             if self.proc.stdout:
                 self.proc.stdout.close()
+        watch = getattr(self, "_jpeg_watch", None)
+        if watch and watch.is_alive():
+            watch.join(timeout=2)
+            if watch.is_alive():
+                raise CaptureError("Network camera watchdog did not stop")
 
 
 class NativePreview:
@@ -882,6 +917,8 @@ class NativePreview:
 class H264CopySession:
     """Probe a network source for matching H.264, then publish that one capture."""
 
+    stall_seconds = 10
+
     def __init__(self, owner, command):
         self.owner = owner
         self.command = command
@@ -1010,18 +1047,63 @@ class H264CopySession:
                     self.reader_error = "Network camera preview is unavailable"
                     self.frames.notify_all()
 
-    def read_jpeg(self):
+    def start_watch(self):
+        now = time.monotonic()
+        self.last_frame = now
+        self.last_native_frame = now
+        self.watch = threading.Thread(
+            target=self._watch, name=f"net-h264-watch-{self.config.id}", daemon=True
+        )
+        self.watch.start()
+
+    def _stop_stalled(self):
+        process = self.proc
+        if process is None or process.poll() is not None:
+            with self.frames:
+                self.reader_error = self.reader_error or "Network camera stalled"
+                self.frames.notify_all()
+            return
+        try:
+            process.kill()
+        except OSError:
+            if process.poll() is None:
+                raise
         with self.frames:
-            self.frames.wait_for(
-                lambda: self.stopped.is_set() or self.latest_jpeg is not None or self.reader_error
-            )
-            if self.stopped.is_set() or self.latest_jpeg is None:
-                raise CaptureError(self.reader_error or "Network camera is unavailable")
-            jpeg, self.latest_jpeg = self.latest_jpeg, None
-            self.frame_received_at = self.last_frame
-            if time.monotonic() - self.last_frame > 5:
-                raise CaptureError("Network camera has no current frame")
-        return jpeg
+            self.reader_error = self.reader_error or "Network camera stalled"
+            self.frames.notify_all()
+
+    def _watch(self):
+        while self.proc is not None and self.proc.poll() is None:
+            if self.stopped.is_set():
+                return
+            now = time.monotonic()
+            if (
+                now - self.last_frame > self.stall_seconds
+                or now - self.last_native_frame > self.stall_seconds
+            ):
+                self._stop_stalled()
+                return
+            self.stopped.wait(0.5)
+
+    def read_jpeg(self):
+        deadline = time.monotonic() + self.stall_seconds
+        with self.frames:
+            while not (self.stopped.is_set() or self.latest_jpeg is not None or self.reader_error):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self.frames.wait(remaining)
+            else:
+                # The loop ended because a frame or a terminal error arrived.
+                if self.stopped.is_set() or self.latest_jpeg is None:
+                    raise CaptureError(self.reader_error or "Network camera is unavailable")
+                jpeg, self.latest_jpeg = self.latest_jpeg, None
+                self.frame_received_at = self.last_frame
+                if time.monotonic() - self.last_frame > 5:
+                    raise CaptureError("Network camera has no current frame")
+                return jpeg
+        self._stop_stalled()
+        raise CaptureError(self.reader_error or "Network camera stalled")
 
     def close(self):
         self.stopped.set()
@@ -1033,6 +1115,10 @@ class H264CopySession:
             terminate_process(self.proc)
         if self.reader and self.reader.is_alive():
             self.reader.join(timeout=5)
+        if self.watch and self.watch.is_alive():
+            self.watch.join(timeout=2)
+            if self.watch.is_alive():
+                raise CaptureError("Network camera watchdog did not stop")
         if self.context:
             self.context.__exit__(None, None, None)
             self.context = None
@@ -1250,7 +1336,9 @@ class DirectShowBackend(NetworkBackend):
             if self.h264_copy:
                 self._spawn_native()
                 return
-            super().open()
+            # Reported H.264 uses _spawn_native. Calling NetworkBackend.open here would
+            # probe this physical device as an RTSP copy and open it twice.
+            self._open_jpeg()
             with self.frames:
                 self.latest_jpeg, self.reader_error = None, None
                 self.last_frame = time.monotonic()
