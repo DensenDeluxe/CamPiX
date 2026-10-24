@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import logging
 import math
 import re
 import shutil
@@ -21,6 +22,7 @@ DSHOW_MODE = re.compile(
     r"max s=(?P<high>\d+x\d+) fps=(?P<max_fps>\S+)"
 )
 DSHOW_CLOCK_TOLERANCE_SECONDS = 0.005
+LOG = logging.getLogger(__name__)
 
 
 class CaptureError(RuntimeError):
@@ -153,6 +155,8 @@ class SyntheticBackend(Backend):
 
 
 class PicameraBackend(Backend):
+    stall_seconds = 10
+
     def __init__(self, config, ffmpeg="ffmpeg"):
         super().__init__(config, ffmpeg)
         self.closed = threading.Event()
@@ -163,6 +167,9 @@ class PicameraBackend(Backend):
         self.cleanup_lock = threading.Lock()
         self.cleanup_done = False
         self.encoder_started = False
+        self.last_frame = time.monotonic()
+        self._watch_stop = None
+        self._watch = None
 
     def open(self):
         from picamera2 import Picamera2
@@ -207,11 +214,31 @@ class PicameraBackend(Backend):
             self.cam.start()
             if self.closed.is_set():
                 raise CaptureError("Picamera2 camera is closed")
+            self.last_frame = time.monotonic()
+            self._start_watch()
             if self.controls:
                 self.apply(self.controls)
         except BaseException:
             self.close()
             raise
+
+    def _start_watch(self):
+        self._watch_stop = threading.Event()
+        self._watch = threading.Thread(
+            target=self._watch_stall,
+            name=f"picamera-watch-{self.config.id}",
+            daemon=True,
+        )
+        self._watch.start()
+
+    def _watch_stall(self):
+        # capture_image can block inside the camera lock. Closing the device from
+        # this thread unblocks it; this thread must not join itself.
+        while not self._watch_stop.wait(0.5):
+            if time.monotonic() - self.last_frame > self.stall_seconds:
+                LOG.warning("Picamera2 camera %s stalled", self.config.id)
+                self._stop_device()
+                return
 
     def _start_native(self):
         self.native_attempted = True
@@ -279,7 +306,7 @@ class PicameraBackend(Backend):
             received = time.monotonic()
             buffer = io.BytesIO()
             request.save("lores", buffer, format="jpeg")
-            self.frame_received_at = received
+            self.frame_received_at = self.last_frame = received
             self.next_preview = received + 1 / min(self.config.fps, 10)
             if self.native_error:
                 raise CaptureError(self.native_error)
@@ -289,7 +316,9 @@ class PicameraBackend(Backend):
 
     def read(self):
         with self.lock:
-            return self.cam.capture_image("main").convert("RGB")
+            image = self.cam.capture_image("main").convert("RGB")
+        self.last_frame = time.monotonic()
+        return image
 
     def snapshot_jpeg(self):
         if not self.native_encoded:
@@ -300,6 +329,7 @@ class PicameraBackend(Backend):
         try:
             buffer = io.BytesIO()
             request.save("main", buffer, format="jpeg")
+            self.last_frame = time.monotonic()
             return buffer.getvalue()
         finally:
             request.release()
@@ -328,6 +358,16 @@ class PicameraBackend(Backend):
             self.controls.update(values)
 
     def close(self):
+        if self._watch_stop:
+            self._watch_stop.set()
+        self._stop_device()
+        watch = self._watch
+        if watch is not None and watch is not threading.current_thread() and watch.is_alive():
+            watch.join(timeout=2)
+            if watch.is_alive():
+                raise CaptureError("Picamera2 watchdog did not stop")
+
+    def _stop_device(self):
         self.closed.set()
         if self.output:
             self.output.stop()
@@ -356,10 +396,15 @@ class PicameraBackend(Backend):
 
 
 class V4L2Backend(Backend):
+    stall_seconds = 10
+
     def __init__(self, config, ffmpeg="ffmpeg"):
         super().__init__(config, ffmpeg)
         self.closed = threading.Event()
         self.pipe = None
+        self.last_frame = time.monotonic()
+        self._watch_stop = None
+        self._watch = None
 
     def open(self):
         if self.closed.is_set():
@@ -402,6 +447,31 @@ class V4L2Backend(Backend):
         if self.closed.is_set():
             self.cam.release()
             raise CaptureError("V4L2 camera is closed")
+        self.last_frame = time.monotonic()
+        self._watch_stop = threading.Event()
+        self._watch = threading.Thread(
+            target=self._watch_opencv,
+            name=f"v4l2-watch-{self.config.id}",
+            daemon=True,
+        )
+        self._watch.start()
+
+    def _watch_opencv(self):
+        # OpenCV's V4L2 read holds the camera lock. release() from this thread
+        # unblocks it; taking that lock here would deadlock the watchdog.
+        while not self._watch_stop.wait(0.5):
+            cam = getattr(self, "cam", None)
+            if cam is None or self.pipe is not None:
+                return
+            if time.monotonic() - self.last_frame > self.stall_seconds:
+                LOG.warning("V4L2 camera %s stalled", self.config.id)
+                try:
+                    cam.release()
+                except OSError:
+                    LOG.warning(
+                        "V4L2 camera %s could not be released after a stall", self.config.id
+                    )
+                return
 
     def _load_controls(self):
         self.native_controls = {}
@@ -453,6 +523,7 @@ class V4L2Backend(Backend):
             ok, frame = self.cam.read()
         if not ok:
             raise CaptureError("V4L2 device stopped delivering frames")
+        self.last_frame = time.monotonic()
         return Image.fromarray(self.cv2.cvtColor(frame, self.cv2.COLOR_BGR2RGB))
 
     def read_jpeg(self):
@@ -500,10 +571,17 @@ class V4L2Backend(Backend):
 
     def close(self):
         self.closed.set()
+        if self._watch_stop:
+            self._watch_stop.set()
         if self.pipe:
             self.pipe.close()
         if hasattr(self, "cam"):
             self.cam.release()
+        watch = self._watch
+        if watch is not None and watch is not threading.current_thread() and watch.is_alive():
+            watch.join(timeout=2)
+            if watch.is_alive():
+                raise CaptureError("V4L2 watchdog did not stop")
 
 
 class NetworkBackend(Backend):

@@ -13,6 +13,7 @@ from campix.notify import (
     DeliveryError,
     catalog_message,
     deliver_mail,
+    deliver_webhook,
     notification_body,
     signature_valid,
     validate_webhook_url,
@@ -263,6 +264,54 @@ def test_storage_reserve_is_notified_once(client, application, monkeypatch, webh
         for row in application.state.db.all("SELECT kind FROM events WHERE kind='storage.reserve'")
     ]
     assert kinds == ["storage.reserve"]
+
+
+def test_webhook_tries_a_later_address_and_stops_after_rejection(monkeypatch):
+    from campix import notify
+
+    received = []
+
+    def serve(sock, status):
+        connection, _address = sock.accept()
+        with connection:
+            data = b""
+            while b"\r\n\r\n" not in data:
+                chunk = connection.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+            received.append(data)
+            connection.sendall(
+                f"HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".encode()
+            )
+
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(1)
+        port = sock.getsockname()[1]
+        thread = threading.Thread(target=serve, args=(sock, "204 No Content"), daemon=True)
+        thread.start()
+        monkeypatch.setattr(
+            notify, "webhook_targets", lambda url, timeout=5: ["127.0.0.2", "127.0.0.1"]
+        )
+        deliver_webhook(f"http://127.0.0.1:{port}/hook", b"{}", "secret", timeout=2)
+        thread.join(2)
+    assert received and b"POST /hook" in received[0]
+
+    received.clear()
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(1)
+        port = sock.getsockname()[1]
+        thread = threading.Thread(target=serve, args=(sock, "500 No"), daemon=True)
+        thread.start()
+        monkeypatch.setattr(
+            notify, "webhook_targets", lambda url, timeout=5: ["127.0.0.1", "127.0.0.2"]
+        )
+        with pytest.raises(DeliveryError, match="rejected"):
+            deliver_webhook(f"http://127.0.0.1:{port}/hook", b"{}", "secret", timeout=2)
+        thread.join(2)
+    assert len(received) == 1
 
 
 def test_signature_and_catalog_helpers_reject_stale_or_foreign_text():

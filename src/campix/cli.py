@@ -14,6 +14,17 @@ from .db import Database
 from .security import Auth
 
 
+def serve_advertises(settings, config_path) -> bool:
+    """Announce on the LAN unless discovery was explicitly disabled."""
+    if "CAMPIX_MDNS" in os.environ:
+        return bool(settings.mdns)
+    if config_path is not None and Path(config_path).is_file():
+        payload = json.loads(Path(config_path).read_text(encoding="utf-8"))
+        if isinstance(payload, dict) and "mdns" in payload:
+            return bool(settings.mdns)
+    return True
+
+
 def main():
     parser = argparse.ArgumentParser(prog="campixd", description="CamPiX camera service")
     parser.add_argument("--config", type=Path, help="JSON settings file")
@@ -165,6 +176,7 @@ def main():
 
         from .app import create_app
 
+        settings.mdns = serve_advertises(settings, args.config)
         uvicorn.run(
             create_app(settings),
             host=settings.host,

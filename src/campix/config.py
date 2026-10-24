@@ -28,6 +28,8 @@ class Settings(BaseModel):
     mediamtx_hls_token: str | None = None
     trust_proxy: bool = False
     web_root: Path | None = None
+    # Library callers stay quiet. campixd serve turns this on unless it is set.
+    mdns: bool = False
 
     @field_validator("mediamtx_binary")
     @classmethod
@@ -99,7 +101,7 @@ class Settings(BaseModel):
             key = "CAMPIX_" + name.upper()
             if key in os.environ:
                 value = os.environ[key]
-                if name in {"secure_cookies", "demo", "trust_proxy"}:
+                if name in {"secure_cookies", "demo", "trust_proxy", "mdns"}:
                     value = value.lower() in {"1", "true", "yes"}
                 values[name] = value
         values.update({k: v for k, v in overrides.items() if v is not None})

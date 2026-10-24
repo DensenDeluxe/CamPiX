@@ -93,6 +93,8 @@ class MediaStore:
             "SELECT * FROM media" + where + " ORDER BY created DESC LIMIT ? OFFSET ?",
             [*args, limit, offset],
         )
+        for item in items:
+            item["locked"] = bool(item["locked"])
         return {"items": items, "total": total, "limit": limit, "offset": offset}
 
     def delete(self, media_id):
