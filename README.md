@@ -38,11 +38,9 @@ The familiar camera-appliance workflow should not depend on an obsolete camera s
 
 The schedule form selects weekdays. Monday is 0. Pausing or editing a rule keeps its next run when the interval stays the same. A new recording has to be shorter than its interval.
 
-This recording uses explicit synthetic demo input and the German interface. Saturday and Sunday are cleared, the rule is saved as Werktage, and pausing leaves Monday through Friday on the card. Select the image to play it.
+This animation uses explicit synthetic demo input and the German interface. Saturday and Sunday are cleared, the rule is saved as Werktage, and pausing leaves Monday through Friday on the card.
 
-[![CamPiX schedule dialog with Monday through Friday selected](docs/media/schedule-weekdays.png)](docs/media/schedule-weekdays.mp4)
-
-<video src="docs/media/schedule-weekdays.mp4" controls width="720"></video>
+![CamPiX schedule dialog with Monday through Friday selected](docs/media/schedule-weekdays.webp)
 
 ## Home Assistant
 
@@ -162,7 +160,7 @@ install.ps1      Windows one-command bootstrap
 scripts/         Installer, packaging, smoke checks, and verified MediaMTX download
 packaging/       Native configuration, systemd, Nginx, and package lifecycle files
 docs/            Architecture, operations, security, release evidence, and research
-docs/media/      Schedule-form recording used in this README
+docs/media/      Animated schedule-form preview used in this README
 pictures/        Supplied source graphics, badges, and design iterations
 ```
 
