@@ -197,7 +197,7 @@ Replace the placeholder with the actual origin and restart the managed service. 
 CamPiX can appear in Home Assistant without a separate YAML camera for each device.
 
 1. Run `campixd serve` on an address Home Assistant can reach. Discovery is on unless `CAMPIX_MDNS=false` or the configuration file contains `"mdns": false`. A program that calls `create_app` directly does not announce unless `mdns` is true.
-2. Copy `homeassistant/custom_components/campix` to Home Assistant's `config/custom_components/campix` directory. Restart Home Assistant.
+2. Install the component with HACS, then restart Home Assistant. Open HACS, choose Integrations, then Custom repositories, and add `https://github.com/DensenDeluxe/CamPiX` with category Integration. Download CamPiX. HACS reads `custom_components/campix` from the default branch of this repository. The same directory can be copied by hand into Home Assistant's `config/custom_components/campix`.
 3. When Home Assistant finds `_campix._tcp`, open the discovered service and enter the CamPiX administrator username and password once. The same form can be opened manually with a host, port, and HTTPS checkbox.
 4. CamPiX creates one revocable viewer token and gives it to Home Assistant. The administrator password is not stored in Home Assistant. Home Assistant then creates one camera entity for each CamPiX camera. The entity id includes the CamPiX service id, so another CamPiX service can use the same camera id. Added and removed cameras follow the catalog about every 10 seconds.
 5. Still images and the live view inside Home Assistant send that token. Home Assistant cannot attach the token to its own stream URL, so the integration proxies MJPEG instead of publishing a camera URL.

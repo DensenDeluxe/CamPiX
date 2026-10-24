@@ -116,7 +116,10 @@ def test_service_announces_only_when_enabled(tmp_path, monkeypatch):
 
 
 def test_home_assistant_component_parses():
-    root = Path("homeassistant/custom_components/campix")
+    root = Path("custom_components/campix")
+    assert {path.name for path in Path("custom_components").iterdir() if path.is_dir()} == {"campix"}
+    hacs = json.loads(Path("hacs.json").read_text(encoding="utf-8"))
+    assert hacs["name"] == "CamPiX"
     sources = list(root.glob("*.py"))
     assert {path.name for path in sources} >= {
         "__init__.py",
@@ -131,8 +134,11 @@ def test_home_assistant_component_parses():
     assert manifest["domain"] == "campix"
     assert manifest["zeroconf"] == ["_campix._tcp.local."]
     assert manifest["config_flow"] is True
+    assert manifest["issue_tracker"].endswith("/issues")
     strings = json.loads((root / "strings.json").read_text(encoding="utf-8"))
+    english = json.loads((root / "translations" / "en.json").read_text(encoding="utf-8"))
     assert "invalid_auth" in strings["config"]["error"]
+    assert english == strings
     combined = "\n".join(path.read_text(encoding="utf-8") for path in sources)
     assert "stream_source" in combined
     assert "Authorization" in combined

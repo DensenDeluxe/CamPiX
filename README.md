@@ -28,7 +28,7 @@ The familiar camera-appliance workflow should not depend on an obsolete camera s
 - **Media library:** playback, authenticated downloads, locking, deletion, retention rules, storage-reserve protection, filename search across the whole library, and queued timelapse exports.
 - **Camera management:** multiple profiles and controls discovered from the selected adapter, rather than invented hardware support.
 - **Schedules:** persistent interval jobs with time windows, weekdays, and time zones. Pausing a rule keeps its next run. A recording has to finish before the next interval.
-- **Home Assistant:** `campixd serve` announces the service on the local network. After one administrator sign-in, the [custom component](docs/DEPLOYMENT.md#home-assistant) adds and removes camera entities from the live catalog. The password is not stored in Home Assistant.
+- **Home Assistant:** `campixd serve` announces the service on the local network. HACS installs the [custom component](docs/DEPLOYMENT.md#home-assistant) from this GitHub repository. After one administrator sign-in, it adds and removes camera entities from the live catalog. The password is not stored in Home Assistant.
 - **Authenticated control plane:** FastAPI, REST/OpenAPI, WebSocket events, SQLite, system metrics, Argon2id passwords, viewer/operator/admin roles, CSRF protection, and revocable sessions.
 - **Optional media server:** supervised, version-pinned MediaMTX for RTSP publishing and authenticated WebRTC/HLS access, with a latest-frame JPEG fallback.
 - **Notifications:** a fixed catalog — motion, stalled capture, storage reserve, and failed export — can be delivered as a signed webhook or as local SMTP mail. No macros or custom commands.
@@ -140,6 +140,8 @@ Build native packages on a matching Linux host with `scripts/build-deb.py`. Cont
 ```text
 src/campix/       Service, capture adapters, recording, auth, scheduling, media plane
 dist/            Served web interface and runtime branding assets
+custom_components/campix/  Home Assistant integration installed by HACS
+hacs.json        HACS name and minimum Home Assistant version
 tests/           API, recovery, media-server, and browser integration tests
 install.sh       Unix one-command bootstrap
 install.ps1      Windows one-command bootstrap
