@@ -83,6 +83,8 @@ def test_snapshot_media_lock_delete_and_path_boundary(client):
     assert image.size == (640, 360)
     assert image.format == "JPEG"
     assert client.patch(f"/api/v1/media/{item['id']}", json={"locked": True}).status_code == 200
+    listed = client.get("/api/v1/media").json()["items"][0]
+    assert listed["locked"] is True
     assert client.delete(f"/api/v1/media/{item['id']}").status_code == 409
     assert client.get("/api/v1/media/../../campix.sqlite3/file").status_code == 404
     client.patch(f"/api/v1/media/{item['id']}", json={"locked": False})
