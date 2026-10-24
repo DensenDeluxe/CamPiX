@@ -28,7 +28,7 @@ The familiar camera-appliance workflow should not depend on an obsolete camera s
 - **Media library:** playback, authenticated downloads, locking, deletion, retention rules, storage-reserve protection, filename search across the whole library, and queued timelapse exports.
 - **Camera management:** multiple profiles and controls discovered from the selected adapter, rather than invented hardware support.
 - **Schedules:** persistent interval jobs with time windows, weekdays, and time zones. Pausing a rule keeps its next run. A recording has to finish before the next interval. The [schedule form](#schedules) selects the days.
-- **Home Assistant:** `campixd serve` announces the service on the local network. After one administrator sign-in, the [custom component](#home-assistant) adds and removes camera entities from the live catalog. The password is not stored in Home Assistant.
+- **Home Assistant:** `campixd serve` announces the service on the local network. HACS installs the [custom component](#home-assistant) from this GitHub repository. After one administrator sign-in, it adds and removes camera entities from the live catalog. The password is not stored in Home Assistant.
 - **Authenticated control plane:** FastAPI, REST/OpenAPI, WebSocket events, SQLite, system metrics, Argon2id passwords, viewer/operator/admin roles, CSRF protection, and revocable sessions.
 - **Optional media server:** supervised, version-pinned MediaMTX for RTSP publishing and authenticated WebRTC/HLS access, with a latest-frame JPEG fallback.
 - **Notifications:** a fixed catalog — motion, stalled capture, storage reserve, and failed export — can be delivered as a signed webhook or as local SMTP mail. No macros or custom commands.
@@ -46,7 +46,7 @@ This recording uses explicit synthetic demo input and the German interface. Satu
 
 ## Home Assistant
 
-`campixd serve` announces `_campix._tcp.local` unless discovery is turned off with `CAMPIX_MDNS=false` or `"mdns": false` in the configuration file. Copy `homeassistant/custom_components/campix` to Home Assistant's `config/custom_components/campix` directory and restart Home Assistant. Open the discovered service and enter the CamPiX administrator once. CamPiX creates one revocable viewer token and does not store the password in Home Assistant. The component then creates one camera entity per catalog camera and follows cameras that are added or removed. Still images and the live view send that token.
+`campixd serve` announces `_campix._tcp.local` unless discovery is turned off with `CAMPIX_MDNS=false` or `"mdns": false` in the configuration file. In HACS, open Integrations, choose Custom repositories, and add `https://github.com/DensenDeluxe/CamPiX` with category Integration. Download CamPiX and restart Home Assistant. HACS reads `custom_components/campix` from the default branch. The same directory can be copied by hand into Home Assistant's `config/custom_components/campix`. Open the discovered service and enter the CamPiX administrator once. CamPiX creates one revocable viewer token and does not store the password in Home Assistant. The component then creates one camera entity per catalog camera and follows cameras that are added or removed. Still images and the live view send that token.
 
 The announcement carries the service id, version, and catalog path. A listener on all interfaces advertises one private IPv4 address. A listener on loopback advertises loopback, so Home Assistant on another machine needs a reachable CamPiX address. Full steps, token revocation, and the address rules are in the [Home Assistant deployment guide](docs/DEPLOYMENT.md#home-assistant).
 
@@ -154,7 +154,8 @@ Build native packages on a matching Linux host with `scripts/build-deb.py`. Cont
 ```text
 src/campix/       Service, capture adapters, recording, auth, scheduling, media plane
 dist/            Served web interface and runtime branding assets
-homeassistant/   Custom component that discovers CamPiX and adds its cameras
+custom_components/campix/  Home Assistant integration installed by HACS
+hacs.json        HACS name and minimum Home Assistant version
 tests/           API, recovery, media-server, and browser integration tests
 install.sh       Unix one-command bootstrap
 install.ps1      Windows one-command bootstrap
