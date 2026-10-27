@@ -15,6 +15,7 @@ CamPiX is an authenticated camera-control, recording, and streaming application 
 | [Research report](deep-research-report.md)            | Ecosystem comparison and long-term target architecture, not a release feature list.         |
 | [Contributing](../CONTRIBUTING.md)                    | Development setup, verification, and English documentation/source-note conventions.         |
 | [Engineering standard](ENGINEERING.md)                | Shared implementation, review, verification, and release requirements.                      |
+| [Agent skills](../AGENTS.md#task-skills)              | Procedures agents read for verification, runtime, security, UI, storage, and installation.  |
 | [Hardware encoding design](NATIVE-ENCODING-DESIGN.md) | Encoder selection, capture throughput, cancellation, verification, and rollback boundaries. |
 | [Graphics and branding](../pictures/README.md)        | Supplied banners, logos, badges, and design iterations.                                     |
 
