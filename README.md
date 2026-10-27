@@ -12,19 +12,19 @@ CamPiX is the camera appliance for Raspberry Pi and Linux, with webcams on Windo
 
 ## Live
 
-![CamPiX live view of a driveway as a person walks to the front door](docs/media/readme-live.webp)
+![CamPiX live view of a driveway as a person walks to the front door](docs/media/interface-live.webp)
 
 ## Every camera
 
-![CamPiX wall with driveway, porch, garden, and workshop cameras](docs/media/readme-wall.webp)
+![CamPiX wall with driveway, porch, garden, and workshop cameras](docs/media/interface-wall.webp)
 
 ## Recording
 
-![CamPiX recording the driveway while the visitor reaches the door](docs/media/readme-record.webp)
+![CamPiX recording the driveway while the visitor reaches the door](docs/media/interface-record.webp)
 
 ## Library
 
-![CamPiX media library opening a workshop photo](docs/media/readme-library.webp)
+![CamPiX media library opening a workshop photo](docs/media/interface-library.webp)
 
 These clips are the running interface. The scenes are illustrative, so the layout is visible without a test pattern. They are not a hardware test.
 
