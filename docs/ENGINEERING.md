@@ -94,3 +94,5 @@ A lint pass is not a security review; a mock/demo pass is not hardware qualifica
 ## Instruction entry-point references
 
 The file conventions follow the [official OpenAI documentation](https://learn.chatgpt.com/docs/agent-configuration/agents-md), [project memory documentation](https://code.claude.com/docs/en/memory), and [project settings reference](https://code.claude.com/docs/en/settings-reference). The instructions guide work; existing organizational settings and explicit user directions may add constraints.
+
+Task procedures for agents live in `.agents/skills/` and stay consistent with this standard. `.claude/skills/` contains relative symlinks to those directories so Claude Code discovers the same files. Always-on rules stay in [AGENTS.md](../AGENTS.md).

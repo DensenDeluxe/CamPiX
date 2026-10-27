@@ -8,6 +8,17 @@
 - Inspect the affected code and tests before editing. Use a short plan for changes spanning service boundaries, security, persistence, or packaging; a small correction does not need a ceremonial plan.
 - For a reported defect, reproduce it and add a regression test before or alongside the fix. Fix causes, not only symptoms. Do not silence failing tests or weaken security to make a check pass.
 
+## Task skills
+
+Always-on rules stay in this file. Procedures for recurring work are in `.agents/skills/<name>/SKILL.md`. Cursor loads that directory. `.claude/skills/<name>` is a relative symlink to the same directory so Claude Code loads it too. Read the matching skill before that work:
+
+- `campix-verify` — choose checks, run them, and report skips and evidence
+- `campix-runtime` — capture, motion, encoding, recording, publishing, and other background workers
+- `campix-security` — authentication, authorization, and trust boundaries
+- `campix-ui` — the buildless interface and browser workflows
+- `campix-persistence` — schema, media integrity, backup, and recovery
+- `campix-installer` — installation, packaging, and first-run setup
+
 ## CamPiX invariants
 
 - Keep camera capture, motion analysis, recording, exports, and media publishing outside HTTP request handling. Preserve bounded queues, cancellation, backoff, shutdown cleanup, and observable errors.

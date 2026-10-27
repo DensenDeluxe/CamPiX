@@ -57,6 +57,7 @@ const files = [
   path.join(root, "CLAUDE.md"),
   ...(await markdownFiles(path.join(root, "docs"))),
   ...(await markdownFiles(path.join(root, "pictures"))),
+  ...(await markdownFiles(path.join(root, ".agents", "skills"))),
 ];
 const errors = [];
 let links = 0;
