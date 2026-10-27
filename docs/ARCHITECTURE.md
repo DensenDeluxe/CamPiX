@@ -15,6 +15,7 @@ campixd (one process per data directory)
    │    ├── Picamera2: native H.264 main / lores preview / dynamic controls
    │    ├── V4L2: matching H.264/MJPEG capture or OpenCV / v4l2-ctl controls
    │    ├── DirectShow: isolated FFmpeg device input on Windows
+   │    ├── AVFoundation: isolated FFmpeg device index on macOS
    │    ├── Network: isolated FFmpeg decoder, RTSP/HTTP(S)
    │    └── Legacy: existing local JPEG preview (not an MMAL/FIFO driver)
    ├── Per camera: motion worker → slow background, ignore mask → event → recording
@@ -23,7 +24,7 @@ campixd (one process per data directory)
    ├── Per camera: native H.264 or shared FFmpeg encoder → bounded packet hub
    │    ├── Recording subscriber → timestamped TS → copy remux → finalized MP4
    │    └── Live subscriber → timestamped TS → copy remux → MediaMTX
-   ├── Scheduler: persistent claim-before-execute rules, no backlog replay
+   ├── Scheduler: persistent claim-before-execute rules, minute windows, no backlog replay
    └── Optional mDNS announcer: `_campix._tcp.local` for Home Assistant discovery
    ├── Export worker: bounded queue, timelapse, explicit job status
    └── Optional: MediaMTX supervisor → RTSP publisher → WebRTC/HLS
@@ -59,19 +60,25 @@ Synthetic capture is permitted only in explicit demo mode. Previously saved synt
 
 ## Storage and restart behavior
 
-JPEG/MP4 files are written to private temporary paths and enter the media index only after successful finalization. Deletion first renames a file as a journal step; a database failure restores it. Startup removes missing indexed entries while retaining interrupted or unindexed files. Automatic MP4 repair after power loss is not claimed.
+JPEG/MP4 files are written to private temporary paths and enter the media index only after successful finalization. Deletion first renames a file as a journal step; a database failure restores it. Startup removes missing indexed entries while retaining interrupted or unindexed files. Startup does not repair an interrupted MP4. An administrator can remux retained `.mp4.partial` files; a file is indexed only after ffprobe reports a duration.
 
-The media index is listed newest first and can be filtered by kind, camera, and a literal filename substring. `%`, `_`, and `\` in that substring match themselves. The library view searches the whole index; pagination does not hide older matches. The overview keeps the three newest items independent of the library page, kind, or search. A library timelapse exports every matching snapshot, at most 500, in capture order.
+The media index is listed newest first and can be filtered by kind, camera, capture time, and a literal filename substring. `%`, `_`, and `\` in that substring match themselves. The library view searches the whole index; pagination does not hide older matches. The overview keeps the three newest items independent of the library page, kind, or search. A library timelapse exports every matching snapshot, at most 500, in capture order.
 
-SQLite access is protected by transactions and thread synchronization. Schema 1 and 2 migrate to schema 3, which adds the notification outbox. Unknown newer schemas are rejected rather than downgraded. Roll back this release with a database backup taken before the migration; an older release will not open a schema 3 file. An operating-system lock prevents two active services from using the same data directory. Database backups exclude active sessions. Media files must be backed up separately.
+SQLite access is protected by transactions and thread synchronization. Schema 1 and 2 migrate forward to schema 4. Schema 3 added the notification outbox, and schema 4 adds share links. Unknown newer schemas are rejected rather than downgraded. Roll back this release with a database backup taken before the migration; an older release will not open a schema 4 file. An operating-system lock prevents two active services from using the same data directory. Database backups exclude active sessions. Media files must be backed up separately.
 
 Audio is a second capture process, started only when `audio_enabled` is true. Synthetic profiles use a generated tone. DirectShow and ALSA use a validated device name as one argument. Network profiles read audio from the same camera URL with a fixed argument list. The live view can play short WAV chunks from that PCM stream. A recording that requested audio is indexed only after the video remux and the AAC mux both succeed; a failed audio take stays unindexed. Profiles with audio off do not start the process and stay video-only.
 
-The overview can show every camera as a current JPEG tile. That wall does not open WebRTC or HLS. Choosing a tile returns to the single live view.
+The overview can show every camera as a current JPEG tile. That wall does not open WebRTC or HLS. Choosing a tile returns to the single live view. The live image can outline the current motion cells and saved regions. A UTC timestamp can be burned into JPEG previews and snapshots; native H.264 recordings stay unstamped.
+
+An empty viewer allow-list keeps the shared library. A non-empty list hides those cameras, their media, and their events from other viewer accounts. Operators and administrators still see every camera. Share links are single-file, expiring, revocable URLs. Only the token digest is stored.
+
+Optional ONVIF Profile S answers device and media SOAP on `/onvif/device_service` after an administrator sets a username and password. The password is stored as an Argon2 hash. PasswordText and HTTP Basic are accepted; password digest is rejected. Stream URIs point at the managed MediaMTX RTSP path. Network cameras can send bounded ONVIF PTZ to the host already in their source URL. The PTZ password stays in the private database and is omitted from configuration export.
+
+macOS local cameras use an AVFoundation adapter with a numeric device index. Discovery lists devices and does not qualify them. Interrupted `.mp4.partial` files can be remuxed by an administrator and are indexed only after `ffprobe` reports a duration. A raspimjpeg text import proposes width, height, frame rate, and motion enablement; command-like lines are rejected and nothing is saved until the camera form is saved.
 
 Saving a schedule keeps its next run when the interval is unchanged, including a pause, a rename, or a weekday edit. Changing the interval schedules the next run one interval ahead. Enabling a rule whose next run is already due lets the next tick run it once. A new recording rule must be shorter than its interval. An older rule that overlaps a recording already in progress is skipped, without an error event, until that take should have finished. The schedule form selects weekdays; Monday is 0.
 
-Notifications deliver only `motion.detected`, `camera.stalled`, `storage.reserve`, and `export.failed`. The payload is a fixed JSON document signed with HMAC-SHA256. The webhook is HTTPS, or HTTP to loopback, with redirects disabled and link-local or metadata addresses rejected. When a name resolves to more than one allowed address, a connection failure tries the next address. An HTTP error response ends that attempt. Mail is SMTP to `127.0.0.1` only. The signing secret and webhook URL are omitted from configuration export. There is no shell, macro, or caller-supplied command.
+Notifications deliver only `motion.detected`, `camera.stalled`, `storage.reserve`, and `export.failed`, and an administrator can limit that catalog or the camera ids that leave the service. System events without a camera id still leave when their kind is enabled. The payload is a fixed JSON document signed with HMAC-SHA256. The webhook is HTTPS, or HTTP to loopback, with redirects disabled and link-local or metadata addresses rejected. When a name resolves to more than one allowed address, a connection failure tries the next address. An HTTP error response ends that attempt. Mail is SMTP to `127.0.0.1` only. The signing secret and webhook URL are omitted from configuration export. There is no shell, macro, or caller-supplied command.
 
 `campixd serve` announces `_campix._tcp.local` unless `CAMPIX_MDNS=false` or the configuration file sets `mdns` to false. `create_app` does not announce unless `mdns` is true. The TXT record contains a stable service id, the CamPiX version, and the catalog path. It does not contain camera URLs or credentials. If UDP port 5353 cannot be opened, discovery is logged as off and the service still starts. The address is the listen address, or a private IPv4 address when the listener is all interfaces. Link-local and metadata addresses are not advertised.
 
@@ -87,4 +94,4 @@ LAN/WAN WebRTC requires an external, secured MediaMTX installation with reachabl
 
 The report proposes a long-term universal successor. Version 0.2.0 uses Python/FastAPI instead of Rust/Go and buildless JavaScript instead of TypeScript, Web Components, and a PWA. This shortens the Picamera2 integration path; it does not fulfill those specific language and frontend recommendations.
 
-AI/Hailo/IMX500, vendor GStreamer, ONVIF, complete historical macros/FIFOs, modern external event hooks, and additional vendor-specific native pipelines are not hidden behind simulated success indicators. They are explicitly listed as outstanding in [RELEASE-READINESS.md](RELEASE-READINESS.md).
+AI/Hailo/IMX500, vendor GStreamer, ONVIF events, complete historical macros/FIFOs, modern external event hooks, and additional vendor-specific native pipelines are not hidden behind simulated success indicators. They are explicitly listed as outstanding in [RELEASE-READINESS.md](RELEASE-READINESS.md).

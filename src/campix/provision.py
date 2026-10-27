@@ -9,6 +9,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 from collections.abc import Callable
 from contextlib import closing
 from pathlib import Path
@@ -17,7 +18,7 @@ from .config import Settings
 from .db import SCHEMA_VERSION, Database
 from .models import CameraConfig, UserCreate, directshow_source_valid
 from .process_lock import ProcessLock
-from .processes import NO_WINDOW, bounded_output, contain_children
+from .processes import NO_WINDOW, bounded_output, contain_children, owned_process
 from .security import HASHER
 
 # QUERYCAP reads driver metadata; it does not allocate buffers or start capture.
@@ -200,10 +201,180 @@ def _directshow_inventory(ffmpeg: str) -> dict:
     return result
 
 
+AVF_DEVICE = re.compile(r"^\[[^\]]*\]\s+\[(?P<index>\d+)\]\s+(?P<name>.+?)\s*$")
+ALSA_DEVICE = re.compile(
+    r"^card\s+(?P<card>\d+):.*device\s+(?P<device>\d+):", re.IGNORECASE
+)
+
+
+def _command_stdout(command: list[str], *, limit: int, timeout: float) -> bytes:
+    """Read a bounded amount of stdout and stop the owned process tree."""
+    output = bytearray()
+    errors: list[BaseException] = []
+
+    def read(process):
+        try:
+            while len(output) <= limit:
+                chunk = process.stdout.read(8192)
+                if not chunk:
+                    return
+                output.extend(chunk)
+            errors.append(ValueError("Child process output exceeds its size limit"))
+        except Exception as exc:
+            errors.append(exc)
+
+    with owned_process(
+        command,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    ) as process:
+        thread = threading.Thread(target=read, args=(process,), daemon=True)
+        thread.start()
+        thread.join(timeout)
+        if thread.is_alive():
+            raise subprocess.TimeoutExpired(command, timeout)
+    if errors:
+        raise errors[0]
+    return bytes(output)
+
+
+def _avfoundation_listing(ffmpeg: str, timeout: float = 10) -> str:
+    """List AVFoundation devices. The empty input makes FFmpeg exit after the list."""
+    command = [ffmpeg, "-hide_banner", "-nostdin", "-f", "avfoundation", "-list_devices", "true", "-i", ""]
+    try:
+        output = bounded_output(command, limit=INVENTORY_BYTES, timeout=timeout)
+    except ValueError:
+        output = b""
+    return output.decode("utf-8", "replace")
+
+
+def _avfoundation_sections(listing: str) -> dict[str, list[tuple[str, str]]]:
+    sections = {"video": [], "audio": []}
+    section = None
+    for line in listing.splitlines():
+        lowered = line.lower()
+        if "avfoundation video devices" in lowered:
+            section = "video"
+            continue
+        if "avfoundation audio devices" in lowered:
+            section = "audio"
+            continue
+        if section is None:
+            continue
+        match = AVF_DEVICE.search(line.strip())
+        if not match:
+            continue
+        name = match.group("name").strip()
+        if section == "video" and name.lower().startswith("capture screen"):
+            continue
+        sections[section].append((match.group("index"), name))
+    return sections
+
+
+def _avfoundation_inventory(ffmpeg: str) -> dict:
+    result = {"devices": [], "diagnostics": [], "hardware_qualified": False}
+    try:
+        listing = _avfoundation_listing(ffmpeg)
+    except (OSError, subprocess.SubprocessError):
+        result["diagnostics"].append(
+            _diagnostic(
+                "avfoundation-listing-failed",
+                "FFmpeg could not list AVFoundation devices; check the configured FFmpeg executable.",
+            )
+        )
+        return result
+    if "Unknown input format" in listing:
+        result["diagnostics"].append(
+            _diagnostic(
+                "avfoundation-unavailable",
+                "The configured FFmpeg build lacks AVFoundation input.",
+            )
+        )
+        return result
+    for index, name in _avfoundation_sections(listing)["video"][:INVENTORY_LIMIT]:
+        if int(index) > 32:
+            continue
+        result["devices"].append(
+            {
+                "backend": "avfoundation",
+                "source": index,
+                "aliases": [index],
+                "model": name[:80],
+                "identity": "avf:" + index,
+                "status": "detected-not-opened",
+                "hardware_qualified": False,
+            }
+        )
+    return result
+
+
+def audio_devices(ffmpeg: str = "ffmpeg") -> dict:
+    """List audio sources whose names already satisfy the capture validator."""
+    result = {"devices": [], "diagnostics": []}
+    if sys.platform == "win32":
+        try:
+            listing = _directshow_listing(ffmpeg)
+        except (OSError, subprocess.SubprocessError, ValueError):
+            result["diagnostics"].append("directshow-listing-failed")
+            return result
+        for name, _alternative in _directshow_audio_devices(listing)[:INVENTORY_LIMIT]:
+            if directshow_source_valid(name):
+                result["devices"].append({"backend": "dshow", "source": name, "name": name[:80]})
+        return result
+    if sys.platform == "darwin":
+        try:
+            listing = _avfoundation_listing(ffmpeg)
+        except (OSError, subprocess.SubprocessError):
+            result["diagnostics"].append("avfoundation-listing-failed")
+            return result
+        for index, name in _avfoundation_sections(listing)["audio"][:INVENTORY_LIMIT]:
+            if index.isdecimal() and int(index) <= 32:
+                result["devices"].append(
+                    {"backend": "avfoundation", "source": index, "name": name[:80]}
+                )
+        return result
+    if sys.platform != "linux":
+        result["diagnostics"].append("audio-discovery-unavailable")
+        return result
+    try:
+        output = _command_stdout(["arecord", "-l"], limit=INVENTORY_BYTES, timeout=8)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        result["diagnostics"].append("alsa-listing-failed")
+        return result
+    result["devices"].append({"backend": "alsa", "source": "default", "name": "ALSA default"})
+    for match in ALSA_DEVICE.finditer(output.decode("utf-8", "replace")):
+        source = f"plughw:{int(match.group('card'))},{int(match.group('device'))}"
+        result["devices"].append({"backend": "alsa", "source": source, "name": source})
+        if len(result["devices"]) >= INVENTORY_LIMIT:
+            break
+    return result
+
+
+def _directshow_audio_devices(listing: str) -> list[tuple[str, str | None]]:
+    devices, section, current = [], None, None
+    for line in listing.splitlines():
+        if "DirectShow video devices" in line or "DirectShow audio devices" in line:
+            section = "video" if "video devices" in line else "audio"
+        elif alternative := DSHOW_ALTERNATIVE.match(line):
+            if current is not None:
+                current[1] = alternative["name"]
+            current = None
+        elif device := DSHOW_DEVICE.match(line):
+            kinds = device["kinds"]
+            types = {kind.strip() for kind in kinds.split(",")} if kinds is not None else {section}
+            current = [device["name"], None] if "audio" in types else None
+            if current is not None:
+                devices.append(current)
+    return [(name, alternative) for name, alternative in devices]
+
+
 def local_inventory(sysfs: Path = Path("/sys/class/video4linux"), ffmpeg: str = "ffmpeg") -> dict:
     """Inventory physical sources without opening a capture stream or qualifying hardware."""
     if sys.platform == "win32":
         return _directshow_inventory(ffmpeg)
+    if sys.platform == "darwin":
+        return _avfoundation_inventory(ffmpeg)
     result = {"devices": [], "diagnostics": [], "hardware_qualified": False}
     if sys.platform != "linux":
         result["diagnostics"].append(

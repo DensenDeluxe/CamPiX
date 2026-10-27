@@ -64,6 +64,10 @@ def audio_source_valid(backend: str, source: str, enabled: bool) -> None:
         ):
             raise ValueError("ALSA audio source must be default, hw:N, or plughw:N,M")
         return
+    if backend == "avfoundation":
+        if not re.fullmatch(r"\d{1,2}", source) or int(source) > 32:
+            raise ValueError("AVFoundation audio source must be a device index from 0 to 32")
+        return
     raise ValueError("This camera backend has no separate audio stream")
 
 
@@ -83,7 +87,9 @@ class MotionRegion(StrictModel):
 class CameraConfig(StrictModel):
     id: str = Field(pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}$")
     name: str = Field(min_length=1, max_length=80)
-    backend: Literal["synthetic", "picamera2", "v4l2", "dshow", "network", "gstreamer", "legacy"]
+    backend: Literal[
+        "synthetic", "picamera2", "v4l2", "dshow", "avfoundation", "network", "gstreamer", "legacy"
+    ]
     source: str = Field("0", max_length=2048)
     width: int = Field(1280, ge=160, le=4096, multiple_of=2)
     height: int = Field(720, ge=120, le=2160, multiple_of=2)
@@ -102,6 +108,12 @@ class CameraConfig(StrictModel):
     audio_source: str = Field("", max_length=256)
     encoder: EncoderName = "auto"
     controls: dict[str, float | int | bool] = Field(default_factory=dict, max_length=32)
+    timestamp_overlay: bool = False
+    viewer_users: list[str] = Field(default_factory=list, max_length=16)
+    onvif_ptz: bool = False
+    onvif_port: int = Field(80, ge=1, le=65535)
+    onvif_username: str = Field("", max_length=64)
+    onvif_password: str = Field("", max_length=128)
 
     @model_validator(mode="after")
     def source_valid(self):
@@ -113,6 +125,10 @@ class CameraConfig(StrictModel):
             raise ValueError(
                 "DirectShow source must be a device name without quotes, colons, or control characters"
             )
+        if self.backend == "avfoundation" and (
+            not self.source.isdecimal() or int(self.source) > 32
+        ):
+            raise ValueError("AVFoundation source must be a video device index from 0 to 32")
         if self.backend == "network":
             url = urlsplit(self.source)
             if url.scheme not in {"rtsp", "rtsps", "http", "https"} or not url.hostname:
@@ -126,6 +142,16 @@ class CameraConfig(StrictModel):
                 raise ValueError("Motion region must stay inside the frame")
         self.motion_mask = motion_mask_valid(self.motion_mask)
         audio_source_valid(self.backend, self.audio_source, self.audio_enabled)
+        if len(set(self.viewer_users)) != len(self.viewer_users) or any(
+            not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}", name) for name in self.viewer_users
+        ):
+            raise ValueError("Viewer name is not allowed")
+        if self.onvif_ptz and self.backend != "network":
+            raise ValueError("PTZ is available only for a network camera")
+        if self.onvif_username and not re.fullmatch(r"[A-Za-z0-9._@-]{1,64}", self.onvif_username):
+            raise ValueError("ONVIF username is not allowed")
+        if any(char in self.onvif_password for char in "\r\n\x00"):
+            raise ValueError("ONVIF password is not allowed")
         if self.backend == "legacy":
             from pathlib import Path
 
@@ -163,6 +189,12 @@ class CameraPatch(StrictModel):
     motion_mask: str | None = None
     audio_enabled: bool | None = None
     audio_source: str | None = Field(None, max_length=256)
+    timestamp_overlay: bool | None = None
+    viewer_users: list[str] | None = Field(None, max_length=16)
+    onvif_ptz: bool | None = None
+    onvif_port: int | None = Field(None, ge=1, le=65535)
+    onvif_username: str | None = Field(None, max_length=64)
+    onvif_password: str | None = Field(None, max_length=128)
 
 
 class UserCreate(StrictModel):
@@ -208,7 +240,9 @@ class Schedule(StrictModel):
     enabled: bool = True
     days: list[int] = Field(default_factory=lambda: list(range(7)), max_length=7)
     start_hour: int = Field(0, ge=0, le=23)
+    start_minute: int = Field(0, ge=0, le=59)
     end_hour: int = Field(24, ge=0, le=24)
+    end_minute: int = Field(0, ge=0, le=59)
     timezone: str = "Europe/Berlin"
 
     @field_validator("days")
@@ -237,4 +271,6 @@ class Schedule(StrictModel):
             return self
         if self.action == "record" and self.duration_seconds >= self.interval_seconds:
             raise ValueError("Recording duration must be shorter than the schedule interval")
+        if self.end_hour == 24 and self.end_minute != 0:
+            raise ValueError("End minute must be 0 when the window ends at hour 24")
         return self

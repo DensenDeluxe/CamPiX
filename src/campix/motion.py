@@ -47,6 +47,19 @@ def analysis_mask(shape, regions, cells: str = ""):
     return active
 
 
+def activity_cells(changed, active) -> str:
+    """16×9 map of cells whose changed samples cover at least two percent of the cell."""
+    height, width = changed.shape
+    bits = []
+    for index in range(MASK_CELLS):
+        row, column = divmod(index, MASK_COLUMNS)
+        y0, y1 = row * height // MASK_ROWS, (row + 1) * height // MASK_ROWS
+        x0, x1 = column * width // MASK_COLUMNS, (column + 1) * width // MASK_COLUMNS
+        cell = changed[y0:y1, x0:x1] & active[y0:y1, x0:x1]
+        bits.append("1" if cell.size and float(np.mean(cell)) >= 0.02 else "0")
+    return "".join(bits)
+
+
 def motion_score(previous, gray, pixel_delta: int, regions, cells: str = "") -> float:
     """Fraction of changed samples. Regions and the ignore mask stay inside the frame."""
     changed = np.abs(gray.astype(np.int16) - previous.astype(np.int16)) > pixel_delta
@@ -65,9 +78,11 @@ class BackgroundModel:
         self.alpha = float(alpha)
         self.hold_alpha = float(hold_alpha)
         self.background = None
+        self.last_cells = "0" * MASK_CELLS
 
     def reset(self):
         self.background = None
+        self.last_cells = "0" * MASK_CELLS
 
     def observe(self, gray, pixel_delta: int, regions, cells: str = "") -> float:
         """Return the changed fraction. The first frame only establishes the background."""
@@ -85,6 +100,7 @@ class BackgroundModel:
         offset = float(np.median(residual[active]))
         changed = np.abs(residual - offset) > pixel_delta
         score = float(np.mean(changed[active]))
+        self.last_cells = activity_cells(changed, active)
         # Apply the measured light shift everywhere, then let stable pixels ease
         # toward the new frame. Moving pixels stay until they have been still.
         adapted = self.background + np.float32(offset)

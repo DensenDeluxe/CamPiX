@@ -41,6 +41,9 @@ def audio_command(ffmpeg: str, backend: str, video_source: str, audio_source: st
         command += ["-f", "dshow", "-i", f"audio={audio_source}"]
     elif backend in {"v4l2", "picamera2"}:
         command += ["-f", "alsa", "-i", audio_source]
+    elif backend == "avfoundation":
+        # The video index is "none" so this process cannot open the camera as well.
+        command += ["-f", "avfoundation", "-i", f"none:{int(audio_source)}"]
     elif backend == "network":
         command += [
             "-protocol_whitelist",

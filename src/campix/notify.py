@@ -13,6 +13,7 @@ import http.client
 import ipaddress
 import json
 import logging
+import re
 import smtplib
 import socket
 import ssl
@@ -56,6 +57,8 @@ class MailChannel(StrictModel):
 class NotificationSettings(StrictModel):
     webhook: WebhookChannel = Field(default_factory=WebhookChannel)
     mail: MailChannel = Field(default_factory=MailChannel)
+    kinds: list[str] = Field(default_factory=lambda: list(CATALOG), max_length=len(CATALOG))
+    cameras: list[str] = Field(default_factory=list, max_length=32)
 
     @model_validator(mode="after")
     def channels_valid(self):
@@ -64,7 +67,15 @@ class NotificationSettings(StrictModel):
         if self.mail.recipient or self.mail.enabled:
             if not mail_recipient_valid(self.mail.recipient):
                 raise ValueError("Mail recipient is not allowed")
+        if len(set(self.kinds)) != len(self.kinds) or any(kind not in CATALOG for kind in self.kinds):
+            raise ValueError("Notification kind is not in the catalog")
+        if any(not _camera_id_valid(camera_id) for camera_id in self.cameras):
+            raise ValueError("Notification camera is not allowed")
         return self
+
+
+def _camera_id_valid(value: str) -> bool:
+    return bool(re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}", value))
 
 
 def catalog_message(kind: str, message: str) -> str:
@@ -336,6 +347,11 @@ class NotificationService:
             return
         with self.lock:
             settings = self.settings
+            if kind not in settings.kinds:
+                return
+            camera_id = event.get("camera_id")
+            if settings.cameras and camera_id and camera_id not in settings.cameras:
+                return
             key = (kind, event.get("camera_id"))
             now = time.monotonic()
             if now - self.recent.get(key, 0) < self.cooldown:

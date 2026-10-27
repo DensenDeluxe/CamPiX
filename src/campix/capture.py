@@ -1715,12 +1715,39 @@ def terminate_process(proc):
             proc.wait(timeout=5)
 
 
+class AvfoundationBackend(DirectShowBackend):
+    """macOS camera captured through FFmpeg's AVFoundation input.
+
+    The device index is one argument of the form ``N:none``. Audio stays in its
+    own process. Listing modes is not part of this input, so the profile size is
+    requested and the existing DirectShow fallback drops it if the device rejects it.
+    """
+
+    model = "AVFoundation camera"
+
+    def native_modes(self):
+        return None
+
+    def input_arguments(self):
+        size = ["-video_size", "{}x{}".format(*self.source_size)] if self.source_size else []
+        return [
+            "-f",
+            "avfoundation",
+            "-framerate",
+            str(self.config.fps),
+            *size,
+            "-i",
+            f"{int(self.config.source)}:none",
+        ]
+
+
 def make_backend(config, ffmpeg):
     cls = {
         "synthetic": SyntheticBackend,
         "picamera2": PicameraBackend,
         "v4l2": V4L2Backend,
         "dshow": DirectShowBackend,
+        "avfoundation": AvfoundationBackend,
         "network": NetworkBackend,
         "legacy": LegacyBackend,
     }.get(config.backend)

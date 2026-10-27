@@ -37,6 +37,15 @@
     wallGeneration: 0,
     wallIds: "",
     audioGeneration: 0,
+    mediaCamera: "",
+    mediaFrom: "",
+    mediaTo: "",
+    picked: new Set(),
+    regions: [],
+    editingSchedule: "",
+    passwordUser: "",
+    clearPtzPassword: false,
+    desktopNotes: localStorage.getItem("campix-notes") === "1",
     audioPlaying: false,
     audioContext: null,
     notifyDirty: false,
@@ -243,6 +252,99 @@
       "Mindestens zwei Fotos erforderlich.",
       "At least two photos required.",
     ],
+    contrast: ["Kontrast", "Contrast"],
+    saturation: ["Sättigung", "Saturation"],
+    autofocus: ["Autofokus", "Autofocus"],
+    fps: ["Bilder pro Sekunde", "Frames per second"],
+    preroll: ["Pre-Roll (Sekunden)", "Pre-roll (seconds)"],
+    motionThreshold: ["Bewegungsschwelle (0–1)", "Motion threshold (0–1)"],
+    timestamp: ["Zeitstempel auf JPEG", "UTC timestamp on JPEG"],
+    timestampHint: [
+      "Der Zeitstempel liegt auf der JPEG-Vorschau und auf Fotos. Native H.264-Aufnahmen bleiben ohne Einblendung.",
+      "The timestamp is burned into the JPEG preview and snapshots. Native H.264 recordings stay unstamped.",
+    ],
+    viewers: ["Sichtbare Benutzer", "Visible accounts"],
+    viewersHint: [
+      "Leer lässt jede Rolle sehen.",
+      "Empty keeps the library shared.",
+    ],
+    regions: ["Bewegungszonen", "Motion regions"],
+    clearRegions: ["Zonen leeren", "Clear regions"],
+    regionsHint: [
+      "Ziehe bis zu acht Rechtecke. Ohne Zone gilt das ganze Bild, abzüglich der dunklen Zellen.",
+      "Drag up to eight rectangles. With none, the whole frame is scored except ignored cells.",
+    ],
+    ptz: ["PTZ über ONVIF", "ONVIF PTZ"],
+    ptzPort: ["ONVIF-Port", "ONVIF port"],
+    ptzUser: ["ONVIF-Benutzer", "ONVIF username"],
+    ptzPassword: ["ONVIF-Passwort", "ONVIF password"],
+    clearPtzPassword: ["PTZ-Passwort entfernen", "Remove PTZ password"],
+    ptzHint: [
+      "Der Dienst spricht nur den Host der Kamera-URL an. Ein leeres Passwortfeld lässt das gespeicherte Passwort unverändert.",
+      "The service contacts only the host in the camera URL. An empty password leaves the saved one unchanged.",
+    ],
+    pause: ["Pausieren", "Pause"],
+    resume: ["Fortsetzen", "Resume"],
+    edit: ["Bearbeiten", "Edit"],
+    enableUser: ["Aktivieren", "Enable"],
+    disableUser: ["Deaktivieren", "Disable"],
+    setPassword: ["Passwort setzen", "Set password"],
+    changePassword: ["Passwort ändern", "Change password"],
+    currentPassword: ["Aktuelles Passwort", "Current password"],
+    newPassword: ["Neues Passwort (12+)", "New password (12+)"],
+    allCameras: ["Alle Kameras", "All cameras"],
+    fromDate: ["Von", "From"],
+    toDate: ["Bis", "Until"],
+    eyebrowOverview: ["ÜBERSICHT", "OVERVIEW"],
+    eyebrowCamera: ["KAMERA", "CAMERA"],
+    eyebrowMedia: ["MEDIENBIBLIOTHEK", "MEDIA LIBRARY"],
+    eyebrowAutomation: ["AUTOMATISIERUNG", "AUTOMATION"],
+    eyebrowDevices: ["FÄHIGKEITEN", "CAPABILITIES"],
+    eyebrowSettings: ["KONFIGURATION", "CONFIGURATION"],
+    system: ["System", "System"],
+    share: ["Link erzeugen", "Create link"],
+    shareReady: [
+      "Der Link wird nur einmal angezeigt.",
+      "The link is shown only once.",
+    ],
+    recover: ["Unterbrochene Aufnahmen prüfen", "Check interrupted recordings"],
+    integrations: ["Integrationen", "Integrations"],
+    onvif: ["ONVIF-Gerät", "ONVIF device"],
+    onvifUser: ["ONVIF-Benutzer", "ONVIF username"],
+    onvifPassword: ["ONVIF-Passwort (12+)", "ONVIF password (12+)"],
+    onvifHint: [
+      "ONVIF ist aus, bis Benutzer und Passwort gesetzt sind. PasswordDigest wird abgelehnt. Der RTSP-Pfad ist der verwaltete MediaMTX-Pfad.",
+      "ONVIF stays off until a username and password are set. Password digest is rejected. The RTSP path is the managed MediaMTX path.",
+    ],
+    pair: ["Home Assistant koppeln", "Pair Home Assistant"],
+    desktopNotes: ["Browser-Hinweise", "Browser notifications"],
+    transfer: ["Sicherung und Import", "Backup and import"],
+    backup: ["Datenbank sichern", "Download database backup"],
+    importConfig: ["Konfiguration importieren", "Import configuration"],
+    readLegacy: ["Raspimjpeg lesen", "Read raspimjpeg"],
+    backupHint: [
+      "Die Sicherung enthält Passwort-Hashes und keine Sitzungen. Medien bleiben ein eigener Ordner. Ein Raspimjpeg-Import übernimmt nur Größe, Rate und Bewegung und speichert noch nichts.",
+      "The backup contains password hashes and no sessions. Media stays a separate folder. A raspimjpeg import reads size, rate, and motion only, and does not save yet.",
+    ],
+    notificationKinds: ["Ereignisse", "Events"],
+    kindMotion: ["Bewegung", "Motion"],
+    kindStalled: ["Stillstand", "Stall"],
+    kindStorage: ["Speicher", "Storage"],
+    kindExport: ["Export", "Export"],
+    notificationCameras: ["Kameras", "Cameras"],
+    startMinute: ["Startminute", "Start minute"],
+    endMinute: ["Endminute", "End minute"],
+    nativeSizes: ["Native Größen", "Native sizes"],
+    encoderFallback: ["Encoder-Rückfall", "Encoder fallback"],
+    liveEncoderFallback: ["Live-Encoder-Rückfall", "Live encoder fallback"],
+    captureProcessing: ["Aufnahmeverarbeitung (ms)", "Capture processing (ms)"],
+    skippedFrames: ["Übersprungene Bilder", "Skipped capture frames"],
+    testStatus: ["Teststatus", "Test status"],
+    motionMaskLabel: ["Bewegungsmaske", "Motion mask"],
+    ignoredCells: ["ignorierte Zellen", "ignored cells"],
+    droppedRecording: ["Verworfene Aufnahmeframes", "Dropped recording frames"],
+    controlsLabel: ["Regler", "Controls"],
+    revoke: ["Widerrufen", "Revoke"],
   };
   const t = (key) => words[key]?.[s.lang === "de" ? 0 : 1] || key;
   const make = (tag, className, text) => {
@@ -511,7 +613,37 @@
           notifications.mail?.recipient || "";
         $("#setting-mail-port").value = notifications.mail?.port || 25;
         $("#setting-webhook-secret").value = notifications.secret || "";
+        const selectedKinds = notifications.kinds;
+        $$("#notification-kinds input").forEach((input) => {
+          input.checked = Array.isArray(selectedKinds)
+            ? selectedKinds.includes(input.value)
+            : true;
+        });
+        $("#setting-notification-cameras").value = (
+          notifications.cameras || []
+        ).join(", ");
         renderDeliveries(notifications.deliveries);
+        try {
+          await loadIntegrations();
+        } catch (error) {
+          toast(error.message, true);
+        }
+        if (!s.audioListed) {
+          s.audioListed = true;
+          try {
+            const audio = await api("/discovery/audio");
+            $("#audio-devices").replaceChildren(
+              ...(audio.devices || []).map((device) => {
+                const option = make("option");
+                option.value = device.source;
+                option.label = device.name;
+                return option;
+              }),
+            );
+          } catch (error) {
+            toast(error.message, true);
+          }
+        }
       }
       renderUsers(users);
     }
@@ -637,9 +769,13 @@
       for (const [key, id] of [
         ["exposure", "exposure-range"],
         ["brightness", "brightness-range"],
+        ["contrast", "contrast-range"],
+        ["saturation", "saturation-range"],
         ["lens_position", "focus-range"],
       ])
-        $("#" + id).value = c?.controls[key] ?? 0;
+        $("#" + id).value =
+          c?.controls[key] ??
+          (key === "contrast" || key === "saturation" ? 1 : 0);
       $("#autofocus-checkbox").checked = !!c?.controls.autofocus;
     }
     outputs();
@@ -676,8 +812,23 @@
       $("#setting-motion-threshold").value = c.motion_threshold;
       $("#setting-audio").checked = !!c.audio_enabled;
       $("#setting-audio-source").value = c.audio_source || "";
+      $("#setting-timestamp").checked = !!c.timestamp_overlay;
+      $("#setting-viewers").value = (c.viewer_users || []).join(", ");
+      $("#setting-ptz").checked = !!c.onvif_ptz;
+      $("#setting-ptz-port").value = c.onvif_port || 80;
+      $("#setting-ptz-user").value = c.onvif_username || "";
+      $("#setting-ptz-password").value = "";
+      s.clearPtzPassword = false;
+      $("#ptz-settings").hidden = c.backend !== "network";
+      s.regions = (c.motion_regions || []).map((region) => ({ ...region }));
+      renderRegions();
       renderMask(c.motion_mask || "");
-      const needsSource = ["dshow", "v4l2", "picamera2"].includes(c.backend);
+      const needsSource = [
+        "dshow",
+        "v4l2",
+        "picamera2",
+        "avfoundation",
+      ].includes(c.backend);
       $("#audio-source-field").hidden = !needsSource;
       $("#setting-audio").disabled = ["legacy", "gstreamer"].includes(
         c.backend,
@@ -691,7 +842,18 @@
     $("#brightness-output").textContent = Number(
       $("#brightness-range").value,
     ).toFixed(2);
+    $("#contrast-output").textContent = Number(
+      $("#contrast-range").value,
+    ).toFixed(2);
+    $("#saturation-output").textContent = Number(
+      $("#saturation-range").value,
+    ).toFixed(2);
     $("#focus-output").textContent = Number($("#focus-range").value).toFixed(1);
+    drawMotion();
+    const pad = $("#ptz-pad");
+    const camera = active();
+    if (pad)
+      pad.hidden = !(camera && camera.onvif_ptz && s.liveMode === "single");
   }
   let previewQueue = Promise.resolve();
 
@@ -1115,6 +1277,103 @@
     );
     return cells.includes("1") ? cells.join("") : "";
   }
+  function renderRegions() {
+    const stage = $("#region-stage");
+    if (!stage) return;
+    stage.replaceChildren(
+      ...s.regions.map((region) => {
+        const box = make("div", "region-box");
+        box.style.left = `${region.x * 100}%`;
+        box.style.top = `${region.y * 100}%`;
+        box.style.width = `${region.w * 100}%`;
+        box.style.height = `${region.h * 100}%`;
+        return box;
+      }),
+    );
+  }
+  function drawMotion() {
+    const canvas = $("#motion-overlay");
+    const camera = active();
+    const image = $("#live-image");
+    if (
+      !canvas ||
+      !camera?.motion_enabled ||
+      s.liveMode !== "single" ||
+      image.hidden
+    ) {
+      if (canvas) canvas.hidden = true;
+      return;
+    }
+    const stage = $("#live-stage");
+    const width = stage.clientWidth;
+    const height = stage.clientHeight;
+    canvas.width = width;
+    canvas.height = height;
+    canvas.hidden = false;
+    const context = canvas.getContext("2d");
+    context.clearRect(0, 0, width, height);
+    const naturalWidth = image.naturalWidth || camera.width || 16;
+    const naturalHeight = image.naturalHeight || camera.height || 9;
+    const scale = Math.min(width / naturalWidth, height / naturalHeight);
+    const boxWidth = naturalWidth * scale;
+    const boxHeight = naturalHeight * scale;
+    const left = (width - boxWidth) / 2;
+    const top = (height - boxHeight) / 2;
+    const cells = camera.motion_cells || "";
+    if (cells.length === 144) {
+      context.fillStyle = "rgba(251, 23, 143, 0.28)";
+      for (let index = 0; index < 144; index += 1) {
+        if (cells[index] !== "1") continue;
+        const column = index % 16;
+        const row = Math.floor(index / 16);
+        context.fillRect(
+          left + (column * boxWidth) / 16,
+          top + (row * boxHeight) / 9,
+          boxWidth / 16,
+          boxHeight / 9,
+        );
+      }
+    }
+    context.strokeStyle = "#07dff1";
+    context.lineWidth = 2;
+    for (const region of camera.motion_regions || []) {
+      context.strokeRect(
+        left + region.x * boxWidth,
+        top + region.y * boxHeight,
+        region.w * boxWidth,
+        region.h * boxHeight,
+      );
+    }
+  }
+  function renderTokens(tokens) {
+    $("#token-list").replaceChildren(
+      ...(tokens || []).map((token) => {
+        const item = make("li", "");
+        item.append(make("span", "", `${token.name} · ${token.id}`));
+        const revoke = make("button", "button ghost", t("revoke"));
+        revoke.type = "button";
+        revoke.addEventListener("click", () =>
+          act(async () => {
+            await api(`/integrations/tokens/${token.id}`, "DELETE");
+            await refresh();
+          }, revoke),
+        );
+        item.append(revoke);
+        return item;
+      }),
+    );
+  }
+  async function loadIntegrations() {
+    const [onvif, tokens] = await Promise.all([
+      api("/integrations/onvif"),
+      api("/integrations/tokens"),
+    ]);
+    if (!$("#integration-form").contains(document.activeElement)) {
+      $("#setting-onvif").checked = !!onvif.enabled;
+      $("#setting-onvif-user").value = onvif.username || "";
+    }
+    renderTokens(tokens);
+  }
   function renderDeliveries(items) {
     const list = $("#notification-deliveries");
     if (!items?.length) {
@@ -1274,6 +1533,18 @@
       make("small", "", `${date(item.created)} · ${bytes(item.size)}`),
     );
     card.append(info);
+    if (!compact && operate()) {
+      const box = make("input", "gallery-check");
+      box.type = "checkbox";
+      box.checked = s.picked.has(item.id);
+      box.addEventListener("click", (event) => event.stopPropagation());
+      box.addEventListener("change", () => {
+        if (box.checked) s.picked.add(item.id);
+        else s.picked.delete(item.id);
+        $("#media-bulk").hidden = s.picked.size === 0;
+      });
+      card.append(box);
+    }
     card.addEventListener("click", () => openMedia(item));
     return card;
   }
@@ -1283,6 +1554,14 @@
       offset: String(offset),
     });
     if (kind) params.set("kind", kind);
+    if (s.mediaCamera) params.set("camera_id", s.mediaCamera);
+    if (s.mediaFrom)
+      params.set("created_after", String(Date.parse(s.mediaFrom) / 1000));
+    if (s.mediaTo) {
+      const end = Date.parse(s.mediaTo);
+      if (Number.isFinite(end))
+        params.set("created_before", String(end / 1000 + 86399));
+    }
     const text = query.trim();
     if (text) params.set("q", text);
     return "/media?" + params;
@@ -1298,6 +1577,15 @@
     );
     if (!s.recent.length)
       $("#recent-media").append(make("p", "empty-message", t("empty")));
+    $("#media-bulk").hidden = s.picked.size === 0;
+    const cameraFilter = $("#media-camera");
+    const current = cameraFilter.value;
+    cameraFilter.replaceChildren(new Option(t("allCameras"), ""));
+    for (const camera of s.cameras)
+      cameraFilter.append(new Option(camera.name, camera.id));
+    cameraFilter.value = s.cameras.some((camera) => camera.id === current)
+      ? current
+      : "";
     $("#media-page").textContent =
       `${Math.floor(s.offset / 24) + 1} · ${s.total}`;
     $("#media-prev").disabled = s.offset === 0;
@@ -1343,7 +1631,16 @@
           await refresh();
         }, remove),
       );
-      actions.push(lock, remove);
+      const share = make("button", "button ghost", t("share"));
+      share.addEventListener("click", () =>
+        act(async () => {
+          const link = await api(`/media/${item.id}/share`, "POST", {
+            hours: 24,
+          });
+          toast(`${t("shareReady")} ${location.origin}${link.path}`);
+        }, share),
+      );
+      actions.push(lock, remove, share);
     }
     $("#media-dialog-actions").replaceChildren(...actions);
     $("#media-dialog").showModal();
@@ -1373,22 +1670,25 @@
     $("#schedule-list").replaceChildren(
       ...s.schedules.map((job) => {
         const card = make("article", "panel schedule-rule");
+        const camera = s.cameras.find((item) => item.id === job.camera_id);
         const text = make("div");
         text.append(
           make("h3", "", job.name),
           make(
             "p",
             "subhead",
-            `${job.camera_id} · ${job.action} · ${job.interval_seconds}s · ${scheduleDays(job)} · ${job.start_hour}:00–${job.end_hour}:00 · ${job.timezone}`,
+            `${camera?.name || job.camera_id} · ${job.action} · ${job.interval_seconds}s · ${scheduleDays(job)} · ${clock(job.start_hour, job.start_minute)}–${clock(job.end_hour, job.end_minute)} · ${job.timezone}`,
           ),
           make("small", "", job.enabled ? date(job.next_run) : t("disabled")),
         );
         card.append(text);
         if (admin()) {
+          const edit = make("button", "button ghost", t("edit"));
+          edit.addEventListener("click", () => openSchedule(job));
           const toggle = make(
             "button",
             "button soft",
-            t(job.enabled ? "disabled" : "enabled"),
+            t(job.enabled ? "pause" : "resume"),
           );
           toggle.addEventListener("click", () =>
             act(async () => {
@@ -1408,7 +1708,7 @@
               await refresh();
             }, remove),
           );
-          card.append(toggle, remove);
+          card.append(edit, toggle, remove);
         }
         return card;
       }),
@@ -1427,6 +1727,30 @@
       .filter((day) => names[day])
       .map((day) => t(names[day]))
       .join(" ");
+  }
+  function clock(hour, minute) {
+    return `${String(hour).padStart(2, "0")}:${String(minute || 0).padStart(2, "0")}`;
+  }
+  function openSchedule(job) {
+    if (!s.cameras.length) return toast(t("noCamera"), true);
+    options($("#schedule-camera"));
+    const form = $("#schedule-form");
+    s.editingSchedule = job?.id || "";
+    form.elements.name.value = job?.name || "";
+    form.elements.camera_id.value = job?.camera_id || s.selected;
+    form.elements.action.value = job?.action || "snapshot";
+    form.elements.interval_seconds.value = job?.interval_seconds || 3600;
+    form.elements.duration_seconds.value = job?.duration_seconds || 30;
+    form.elements.start_hour.value = job?.start_hour ?? 0;
+    form.elements.start_minute.value = job?.start_minute ?? 0;
+    form.elements.end_hour.value = job?.end_hour ?? 24;
+    form.elements.end_minute.value = job?.end_minute ?? 0;
+    form.elements.timezone.value = job?.timezone || "Europe/Berlin";
+    const days = new Set(job?.days || [0, 1, 2, 3, 4, 5, 6]);
+    $$("#schedule-form input[name=days]").forEach((input) => {
+      input.checked = days.has(Number(input.value));
+    });
+    $("#schedule-dialog").showModal();
   }
   function renderDevices() {
     $("#device-list").replaceChildren(
@@ -1457,7 +1781,7 @@
         for (const [k, v] of [
           ["Profile", `${c.width} × ${c.height} @ ${c.fps_target}`],
           ["Observed FPS", c.fps],
-          ["Controls", c.capabilities.controls.join(", ") || "—"],
+          [t("controlsLabel"), c.capabilities.controls.join(", ") || "—"],
           ["Hardware verified", c.encoding.hardware_verified ? "yes" : "no"],
           ["Encoders", c.encoding.encoders.join(", ") || "—"],
           [
@@ -1478,32 +1802,33 @@
           ],
           ["Zero-copy scope", c.encoding.zero_copy_scope || "—"],
           ["Zero-copy fallback", c.encoding.zero_copy_reason || "—"],
-          ["Native capture fallback", c.encoding.native_fallback_reason || "—"],
+          [t("nativeSizes"), (c.capabilities.modes || []).join(", ") || "—"],
+          [t("encoderFallback"), c.encoding.native_fallback_reason || "—"],
           [
             "Encoder sessions started",
             c.encoding.encoder_sessions_started ?? "—",
           ],
           ["Preview size", c.preview_size?.join("×") || "—"],
           ["Preview FPS", c.preview_fps ?? "—"],
-          ["Encoder fallback", c.encoding.fallback_reason || "—"],
+          [t("encoderFallback"), c.encoding.fallback_reason || "—"],
           [
             t("liveEncoder"),
             s.system?.media_plane.publishers?.[c.id]?.encoder || "—",
           ],
           [
-            "Live encoder fallback",
+            t("liveEncoderFallback"),
             s.system?.media_plane.publishers?.[c.id]?.fallback_reason || "—",
           ],
-          ["Capture processing (ms)", c.capture_processing_ms ?? "—"],
-          ["Skipped capture frames", c.capture_dropped_frames],
-          ["Test status", c.capabilities.test_status || "unverified"],
+          [t("captureProcessing"), c.capture_processing_ms ?? "—"],
+          [t("skippedFrames"), c.capture_dropped_frames],
+          [t("testStatus"), c.capabilities.test_status || "unverified"],
           ["Motion", t(c.motion_enabled ? "enabled" : "disabled")],
-          ["Motion mask", c.motion_mask ? "ignored cells" : "—"],
+          [t("motionMaskLabel"), c.motion_mask ? t("ignoredCells") : "—"],
           [
             "Audio",
             c.audio_enabled ? c.audio_status || t("enabled") : t("disabled"),
           ],
-          ["Dropped recording frames", c.dropped_frames],
+          [t("droppedRecording"), c.dropped_frames],
         ])
           details.append(make("dt", "", k), make("dd", "", String(v)));
         card.append(details);
@@ -1551,7 +1876,7 @@
         const toggle = make(
           "button",
           "button ghost",
-          t(u.disabled ? "enabled" : "disabled"),
+          t(u.disabled ? "enableUser" : "disableUser"),
         );
         toggle.addEventListener("click", () =>
           act(async () => {
@@ -1559,7 +1884,13 @@
             await refresh();
           }, toggle),
         );
-        row.append(roles, toggle);
+        const password = make("button", "button ghost", t("setPassword"));
+        password.addEventListener("click", () => {
+          s.passwordUser = u.id;
+          $("#user-password-form").reset();
+          $("#user-password-dialog").showModal();
+        });
+        row.append(roles, toggle, password);
         return row;
       }),
     );
@@ -1576,6 +1907,18 @@
     ws.onmessage = (event) => {
       const message = JSON.parse(event.data);
       if (message.kind === "heartbeat") return;
+      if (
+        s.desktopNotes &&
+        typeof Notification === "function" &&
+        Notification.permission === "granted" &&
+        [
+          "motion.detected",
+          "camera.stalled",
+          "storage.reserve",
+          "export.failed",
+        ].includes(message.kind)
+      )
+        new Notification("CamPiX", { body: message.message || message.kind });
       clearTimeout(s.refreshTimer);
       s.refreshTimer = setTimeout(
         () =>
@@ -1708,7 +2051,13 @@
       $("#fullscreen-exit").focus({ preventScroll: true });
     }
   });
-  for (const id of ["exposure-range", "brightness-range", "focus-range"])
+  for (const id of [
+    "exposure-range",
+    "brightness-range",
+    "contrast-range",
+    "saturation-range",
+    "focus-range",
+  ])
     $("#" + id).addEventListener("input", () => {
       s.dirtyControls = true;
       outputs();
@@ -1722,6 +2071,8 @@
       for (const [k, v] of [
         ["exposure", Number($("#exposure-range").value)],
         ["brightness", Number($("#brightness-range").value)],
+        ["contrast", Number($("#contrast-range").value)],
+        ["saturation", Number($("#saturation-range").value)],
         ["lens_position", Number($("#focus-range").value)],
         ["autofocus", $("#autofocus-checkbox").checked],
       ])
@@ -1813,14 +2164,7 @@
         $("#discovery-list").append(make("p", "empty-message", t("noDevices")));
     }, e.currentTarget),
   );
-  $("#new-schedule").addEventListener("click", () => {
-    if (!s.cameras.length) return toast(t("noCamera"), true);
-    options($("#schedule-camera"));
-    $$("#schedule-form input[name=days]").forEach((input) => {
-      input.checked = true;
-    });
-    $("#schedule-dialog").showModal();
-  });
+  $("#new-schedule").addEventListener("click", () => openSchedule(null));
   $("#schedule-form").addEventListener("submit", (e) => {
     e.preventDefault();
     const form = e.currentTarget;
@@ -1833,14 +2177,17 @@
       "interval_seconds",
       "duration_seconds",
       "start_hour",
+      "start_minute",
       "end_hour",
+      "end_minute",
     ])
       payload[key] = Number(payload[key]);
     act(async () => {
       await api("/schedules", "POST", {
         ...payload,
-        id: "job-" + crypto.randomUUID().slice(0, 8),
+        id: s.editingSchedule || "job-" + crypto.randomUUID().slice(0, 8),
       });
+      s.editingSchedule = "";
       $("#schedule-dialog").close();
       toast(t("saved"));
       await refresh();
@@ -1883,11 +2230,27 @@
       motion_enabled: $("#setting-motion").checked,
       motion_threshold: Number($("#setting-motion-threshold").value),
       motion_mask: maskValue(),
+      motion_regions: s.regions,
+      timestamp_overlay: $("#setting-timestamp").checked,
+      viewer_users: $("#setting-viewers")
+        .value.split(",")
+        .map((name) => name.trim())
+        .filter(Boolean),
       audio_enabled: $("#setting-audio").checked,
-      audio_source: ["dshow", "v4l2", "picamera2"].includes(active()?.backend)
+      audio_source: ["dshow", "v4l2", "picamera2", "avfoundation"].includes(
+        active()?.backend,
+      )
         ? $("#setting-audio-source").value
         : "",
     };
+    if (active()?.backend === "network") {
+      payload.onvif_ptz = $("#setting-ptz").checked;
+      payload.onvif_port = Number($("#setting-ptz-port").value);
+      payload.onvif_username = $("#setting-ptz-user").value.trim();
+      if (s.clearPtzPassword) payload.onvif_password = "";
+      else if ($("#setting-ptz-password").value)
+        payload.onvif_password = $("#setting-ptz-password").value;
+    }
     act(async () => {
       if (!active()) throw new Error(t("noCamera"));
       await api(`/cameras/${s.selected}`, "PATCH", payload);
@@ -1921,6 +2284,13 @@
         recipient: $("#setting-mail-recipient").value.trim(),
         port: Number($("#setting-mail-port").value),
       },
+      kinds: [
+        ...$("#notification-kinds").querySelectorAll("input:checked"),
+      ].map((input) => input.value),
+      cameras: $("#setting-notification-cameras")
+        .value.split(",")
+        .map((name) => name.trim())
+        .filter(Boolean),
     };
     act(async () => {
       const saved = await api("/notifications", "PATCH", payload);
@@ -2017,6 +2387,223 @@
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) stopStream();
     else if (s.user && s.view === "overview") resumeLive();
+  });
+  function bindRegionStage() {
+    const stage = $("#region-stage");
+    let origin = null;
+    stage.addEventListener("pointerdown", (event) => {
+      if (s.regions.length >= 8) return;
+      const bounds = stage.getBoundingClientRect();
+      origin = {
+        x: (event.clientX - bounds.left) / bounds.width,
+        y: (event.clientY - bounds.top) / bounds.height,
+      };
+      stage.setPointerCapture(event.pointerId);
+    });
+    stage.addEventListener("pointerup", (event) => {
+      if (!origin) return;
+      const bounds = stage.getBoundingClientRect();
+      const x = (event.clientX - bounds.left) / bounds.width;
+      const y = (event.clientY - bounds.top) / bounds.height;
+      const region = {
+        x: Math.min(origin.x, x),
+        y: Math.min(origin.y, y),
+        w: Math.abs(x - origin.x),
+        h: Math.abs(y - origin.y),
+      };
+      origin = null;
+      if (region.w < 0.02 || region.h < 0.02) return;
+      region.x = Math.max(0, Math.min(1, region.x));
+      region.y = Math.max(0, Math.min(1, region.y));
+      region.w = Math.min(region.w, 1 - region.x);
+      region.h = Math.min(region.h, 1 - region.y);
+      s.regions.push(region);
+      s.cameraDirty = true;
+      renderRegions();
+    });
+  }
+  bindRegionStage();
+  $("#region-clear").addEventListener("click", () => {
+    s.regions = [];
+    s.cameraDirty = true;
+    renderRegions();
+  });
+  $("#clear-ptz-password").addEventListener("click", () => {
+    s.clearPtzPassword = true;
+    s.cameraDirty = true;
+    $("#setting-ptz-password").value = "";
+    toast(t("clearPtzPassword"));
+  });
+  $("#password-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    act(async () => {
+      await api("/auth/password", "POST", {
+        current_password: $("#current-password").value,
+        new_password: $("#new-password").value,
+      });
+      showLogin();
+    }, event.submitter);
+  });
+  $("#user-password-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    act(async () => {
+      await api(`/users/${s.passwordUser}`, "PATCH", {
+        password: new FormData(form).get("password"),
+      });
+      $("#user-password-dialog").close();
+      toast(t("saved"));
+    }, event.submitter);
+  });
+  $("#integration-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const password = $("#setting-onvif-password").value;
+    const payload = {
+      enabled: $("#setting-onvif").checked,
+      username: $("#setting-onvif-user").value.trim(),
+    };
+    if (password) payload.password = password;
+    act(async () => {
+      await api("/integrations/onvif", "PUT", payload);
+      $("#setting-onvif-password").value = "";
+      toast(t("saved"));
+      await refresh();
+    }, event.submitter);
+  });
+  $("#pair-homeassistant").addEventListener("click", () =>
+    act(async () => {
+      const paired = await api("/integrations/homeassistant/pair", "POST", {
+        name: "Home Assistant",
+      });
+      const note = $("#pair-token");
+      note.hidden = false;
+      note.textContent = `${t("shareReady")} ${paired.token}`;
+      await refresh();
+    }, $("#pair-homeassistant")),
+  );
+  $("#notify-desktop").addEventListener("click", async () => {
+    if (typeof Notification !== "function") return toast(t("noHls"), true);
+    const permission = await Notification.requestPermission();
+    s.desktopNotes = permission === "granted";
+    localStorage.setItem("campix-notes", s.desktopNotes ? "1" : "0");
+    toast(s.desktopNotes ? t("enabled") : t("disabled"), !s.desktopNotes);
+  });
+  $("#backup-button").addEventListener("click", () =>
+    act(async () => {
+      const response = await fetch("/api/v1/backup", {
+        credentials: "same-origin",
+      });
+      if (!response.ok) throw new Error(t("backup"));
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = make("a");
+      link.href = url;
+      link.download = "campix-backup.sqlite3";
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }, $("#backup-button")),
+  );
+  $("#import-file").addEventListener("change", (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () =>
+      act(async () => {
+        await api("/import", "POST", JSON.parse(String(reader.result)));
+        toast(t("saved"));
+        await refresh();
+      });
+    reader.readAsText(file);
+    event.target.value = "";
+  });
+  $("#raspimjpeg-file").addEventListener("change", (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () =>
+      act(async () => {
+        const proposal = await api("/import/raspimjpeg", "POST", {
+          text: String(reader.result),
+        });
+        if (proposal.width && proposal.height)
+          $("#setting-resolution").value =
+            `${proposal.width}x${proposal.height}`;
+        if (proposal.fps) $("#setting-fps").value = proposal.fps;
+        if ("motion_enabled" in proposal)
+          $("#setting-motion").checked = !!proposal.motion_enabled;
+        s.cameraDirty = true;
+        toast(t("saved"));
+      });
+    reader.readAsText(file);
+    event.target.value = "";
+  });
+  for (const [id, action] of [
+    ["bulk-lock", "lock"],
+    ["bulk-unlock", "unlock"],
+    ["bulk-delete", "delete"],
+  ])
+    $("#" + id).addEventListener("click", () =>
+      act(
+        async () => {
+          if (!s.picked.size) return;
+          if (action === "delete" && !confirm(t("confirmDelete"))) return;
+          await api("/media/actions", "POST", { ids: [...s.picked], action });
+          s.picked.clear();
+          await refresh();
+        },
+        $("#" + id),
+      ),
+    );
+  $("#recover-button").addEventListener("click", () =>
+    act(async () => {
+      await api("/media/recovery", "POST");
+      toast(t("recover"));
+    }, $("#recover-button")),
+  );
+  $("#media-camera").addEventListener("change", () =>
+    act(async () => {
+      s.mediaCamera = $("#media-camera").value;
+      s.offset = 0;
+      await refresh();
+    }),
+  );
+  for (const id of ["media-from", "media-to"])
+    $("#" + id).addEventListener("change", () =>
+      act(async () => {
+        s.mediaFrom = $("#media-from").value;
+        s.mediaTo = $("#media-to").value;
+        s.offset = 0;
+        await refresh();
+      }),
+    );
+  document.addEventListener("keydown", (event) => {
+    const dialog = $("#media-dialog");
+    if (!dialog.open) return;
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    const items = s.view === "media" ? s.media : s.recent;
+    const index = items.findIndex(
+      (item) => item.filename === $("#media-dialog-title").textContent,
+    );
+    const next = items[index + (event.key === "ArrowRight" ? 1 : -1)];
+    if (!next) return;
+    event.preventDefault();
+    openMedia(next);
+  });
+  $$("[data-ptz]").forEach((button) => {
+    button.addEventListener("pointerdown", () => {
+      const value = button.dataset.ptz;
+      const action = value === "stop" ? "stop" : "move";
+      const [pan, tilt] =
+        value === "stop" ? [0, 0] : value.split(",").map(Number);
+      act(async () => {
+        await api(`/cameras/${s.selected}/ptz`, "POST", {
+          action,
+          pan,
+          tilt,
+          zoom: 0,
+        });
+      }, button);
+    });
   });
   setInterval(() => {
     const now = new Date();

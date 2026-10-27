@@ -15,14 +15,26 @@ from .models import Schedule
 LOG = logging.getLogger(__name__)
 
 
+def window_minutes(schedule):
+    """Inclusive start and exclusive end, in minutes from local midnight."""
+    return (
+        schedule.start_hour * 60 + schedule.start_minute,
+        schedule.end_hour * 60 + schedule.end_minute,
+    )
+
+
 def in_window(schedule, now):
     local = dt.datetime.fromtimestamp(now, ZoneInfo(schedule.timezone))
-    start, end = schedule.start_hour, schedule.end_hour
-    if start <= end:
-        return local.weekday() in schedule.days and start <= local.hour < end
+    minute = local.hour * 60 + local.minute
+    start, end = window_minutes(schedule)
+    # Equal bounds are an empty window. 00:00–24:00 stays a full day because 0 < 1440.
+    if start == end:
+        return False
+    if start < end:
+        return local.weekday() in schedule.days and start <= minute < end
     # After midnight belongs to the previous day's overnight schedule.
-    day = (local.weekday() - 1) % 7 if local.hour < end else local.weekday()
-    return day in schedule.days and (local.hour >= start or local.hour < end)
+    day = (local.weekday() - 1) % 7 if minute < end else local.weekday()
+    return day in schedule.days and (minute >= start or minute < end)
 
 
 class Scheduler:

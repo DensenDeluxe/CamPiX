@@ -9,6 +9,7 @@ import threading
 import time
 from collections import deque
 from concurrent.futures import Future, TimeoutError
+from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
@@ -20,7 +21,8 @@ from .capture import CaptureError, make_backend
 from .encoded import AnnexBParser, EncodedHub, h264_dimensions
 from .encoding import EncoderSelection, EncoderUnavailable, jpeg_dimensions, select_encoder
 from .models import CameraConfig
-from .motion import BackgroundModel
+from .motion import MASK_CELLS, BackgroundModel
+from .overlay import stamp_jpeg
 from .recording import EncodedRecorder, encoder_probe
 from .shared_encoder import SharedEncoder
 
@@ -113,6 +115,8 @@ class Camera:
         self.shed_checked = 0.0
         self.analysis = None
         self.analysis_sequence = 0
+        self.motion_score = 0.0
+        self.motion_cells = "0" * MASK_CELLS
         self.recorder = None
         self.audio = None
         self.capture_thread = threading.Thread(
@@ -445,6 +449,8 @@ class Camera:
         size = jpeg_dimensions(jpeg)
         try:
             preview = jpeg if size and size[0] <= 960 and size[1] <= 540 else downscale_jpeg(jpeg)
+            if self.config.timestamp_overlay:
+                preview = stamp_jpeg(preview, datetime.now(UTC))
         except (OSError, ValueError):
             return
         with self.condition:
@@ -512,6 +518,9 @@ class Camera:
                         self.config.motion_regions,
                         self.config.motion_mask,
                     )
+                    with self.condition:
+                        self.motion_score = round(score, 4)
+                        self.motion_cells = model.last_cells
                     active_frames = (
                         active_frames + 1 if score >= self.config.motion_threshold else 0
                     )
@@ -537,6 +546,9 @@ class Camera:
                     model.reset()
                     signature = None
                     active_frames = 0
+                    with self.condition:
+                        self.motion_score = 0.0
+                        self.motion_cells = model.last_cells
                 with self.operation_lock:
                     recorder = self.recorder
                     if recorder and (
@@ -645,6 +657,11 @@ class Camera:
         except TimeoutError:
             request.cancel()
             raise CaptureError("Camera photo did not arrive in time") from None
+        if self.config.timestamp_overlay:
+            try:
+                jpeg = stamp_jpeg(jpeg, datetime.now(UTC))
+            except (OSError, ValueError) as exc:
+                raise CaptureError("Timestamp overlay could not be applied") from exc
         return self.store.snapshot(self.config.id, jpeg, trigger)
 
     def start_recording(self, duration=None, trigger="manual"):
@@ -773,6 +790,15 @@ class Camera:
                 "motion_enabled": self.config.motion_enabled,
                 "motion_threshold": self.config.motion_threshold,
                 "motion_mask": self.config.motion_mask,
+                "motion_regions": [region.model_dump() for region in self.config.motion_regions],
+                "motion_score": self.motion_score,
+                "motion_cells": self.motion_cells,
+                "timestamp_overlay": self.config.timestamp_overlay,
+                "viewer_users": list(self.config.viewer_users),
+                "onvif_ptz": self.config.onvif_ptz,
+                "onvif_port": self.config.onvif_port,
+                "onvif_username": self.config.onvif_username,
+                "onvif_password_set": bool(self.config.onvif_password),
                 "audio_enabled": self.config.audio_enabled,
                 "audio_source": self.config.audio_source,
                 "audio_status": self.audio.status if self.audio else "off",
