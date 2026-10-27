@@ -12,7 +12,7 @@ function isPreviewRequest(url, camera = "") {
   return new URL(url).pathname.endsWith(suffix);
 }
 
-async function signin(page, role = "admin") {
+async function signin(page, role = "admin", expectedCameras = "1 / 1") {
   let cookies = sessionCookies.get(role);
   if (cookies) {
     await page.context().addCookies(cookies);
@@ -41,7 +41,8 @@ async function signin(page, role = "admin") {
     expect(cookies).toHaveLength(1);
     sessionCookies.set(role, cookies);
   }
-  await expect(page.locator("#camera-count")).toHaveText("1 / 1");
+  if (expectedCameras)
+    await expect(page.locator("#camera-count")).toHaveText(expectedCameras);
   await page.locator("#transport-select").selectOption("mjpeg");
 }
 
@@ -86,7 +87,7 @@ test("real capture, recording, library, schedule and persistent profile", async 
   );
   await page.locator(".nav-item[data-view=settings]").click();
   await page.locator("#setting-camera-name").fill("Browser validated camera");
-  await page.locator("#camera-settings-form button").click();
+  await page.locator("#camera-settings-form .panel-header button").click();
   await expect(page.locator("#setting-camera-name")).toHaveValue(
     "Browser validated camera",
   );
@@ -109,7 +110,7 @@ test("explicit encoder settings persist and automatic selection reports a tested
   await signin(page);
   await page.locator(".nav-item[data-view=settings]").click();
   await page.locator("#setting-encoder").selectOption("libx264");
-  await page.locator("#camera-settings-form button").click();
+  await page.locator("#camera-settings-form .panel-header button").click();
   await expect
     .poll(async () => {
       const cameras = await (await page.request.get("/api/v1/cameras")).json();
@@ -121,7 +122,7 @@ test("explicit encoder settings persist and automatic selection reports a tested
   await page.locator(".nav-item[data-view=settings]").click();
   await expect(page.locator("#setting-encoder")).toHaveValue("libx264");
   await page.locator("#setting-encoder").selectOption("auto");
-  await page.locator("#camera-settings-form button").click();
+  await page.locator("#camera-settings-form .panel-header button").click();
   await expect
     .poll(async () => {
       const cameras = await (await page.request.get("/api/v1/cameras")).json();
@@ -138,7 +139,7 @@ test("live JPEG preview can exceed 30 requests per second without parallel buffe
   await signin(page);
   await page.locator(".nav-item[data-view=settings]").click();
   await page.locator("#setting-fps").fill("60");
-  await page.locator("#camera-settings-form button").click();
+  await page.locator("#camera-settings-form .panel-header button").click();
   await expect
     .poll(async () => {
       const cameras = await (await page.request.get("/api/v1/cameras")).json();
@@ -169,7 +170,7 @@ test("live JPEG preview can exceed 30 requests per second without parallel buffe
   expect(maximum).toBe(1);
   await page.locator(".nav-item[data-view=settings]").click();
   await page.locator("#setting-fps").fill("10");
-  await page.locator("#camera-settings-form button").click();
+  await page.locator("#camera-settings-form .panel-header button").click();
   await expect
     .poll(async () => {
       const cameras = await (await page.request.get("/api/v1/cameras")).json();
@@ -932,7 +933,7 @@ test("camera wall shows one JPEG per camera and settings keep mask and notificat
   await page.locator(".nav-item[data-view=settings]").click();
   await page.locator("#motion-mask [role=button]").first().click();
   await page.locator("#setting-motion").check();
-  await page.locator("#camera-settings-form button").click();
+  await page.locator("#camera-settings-form .panel-header button").click();
   await expect(page.locator("#toast")).toContainText("Gespeichert");
   await page.reload();
   await expect(page.locator("#workspace")).toBeVisible();
@@ -962,4 +963,35 @@ test("camera wall shows one JPEG per camera and settings keep mask and notificat
   await page.locator("#live-wall").click();
   await expect(page.locator(".wall-tile")).toHaveCount(2);
   await expect(page.locator("#live-stage")).toBeHidden();
+});
+
+test("contrast, schedule editing, password form, and pairing stay in the interface", async ({
+  page,
+}) => {
+  await signin(page, "admin", null);
+  await expect(page.locator("#contrast-range")).toBeVisible();
+  await expect(page.locator("#saturation-range")).toBeVisible();
+  await page.locator(".nav-item[data-view=scheduler]").click();
+  await page.locator("#new-schedule").click();
+  await page.locator("#schedule-form [name=name]").fill("Edited rule");
+  await page.locator("#schedule-form [name=start_minute]").fill("15");
+  await page.locator("#schedule-form [name=end_hour]").fill("18");
+  await page.locator("#schedule-form [name=end_minute]").fill("45");
+  await page.locator("#schedule-form .full-button").click();
+  const card = page.locator("#schedule-list article", {
+    hasText: "Edited rule",
+  });
+  await expect(card).toContainText("00:15");
+  await card.getByRole("button", { name: "Bearbeiten" }).click();
+  await page.locator("#schedule-form [name=name]").fill("Edited rule saved");
+  await page.locator("#schedule-form .full-button").click();
+  await expect(
+    page.locator("#schedule-list h3", { hasText: "Edited rule saved" }),
+  ).toHaveCount(1);
+  await page.locator(".nav-item[data-view=settings]").click();
+  await expect(page.locator("#password-form")).toBeVisible();
+  await expect(page.locator("#pair-homeassistant")).toBeVisible();
+  await page.locator("#pair-homeassistant").click();
+  await expect(page.locator("#pair-token")).toContainText("cx_");
+  await expect(page.locator("#token-list li")).toHaveCount(1);
 });

@@ -27,12 +27,12 @@ The familiar camera-appliance workflow should not depend on an obsolete camera s
 - **Motion:** a slow background model absorbs lighting changes. A 16×9 ignore mask drops permanently busy cells, and normalized regions still limit the score.
 - **Media library:** playback, authenticated downloads, locking, deletion, retention rules, storage-reserve protection, filename search across the whole library, and queued timelapse exports.
 - **Camera management:** multiple profiles and controls discovered from the selected adapter, rather than invented hardware support.
-- **Schedules:** persistent interval jobs with time windows, weekdays, and time zones. Pausing a rule keeps its next run. A recording has to finish before the next interval. The [schedule form](#schedules) selects the days.
+- **Schedules:** persistent interval jobs with minute-level time windows, weekdays, and time zones. Rules can be edited in place. Pausing a rule keeps its next run. A recording has to finish before the next interval. The [schedule form](#schedules) selects the days.
 - **Home Assistant:** `campixd serve` announces the service on the local network. HACS installs the [custom component](#home-assistant) from this GitHub repository. After one administrator sign-in, it adds and removes camera entities from the live catalog. The password is not stored in Home Assistant.
 - **Authenticated control plane:** FastAPI, REST/OpenAPI, WebSocket events, SQLite, system metrics, Argon2id passwords, viewer/operator/admin roles, CSRF protection, and revocable sessions.
 - **Optional media server:** supervised, version-pinned MediaMTX for RTSP publishing and authenticated WebRTC/HLS access, with a latest-frame JPEG fallback.
 - **Notifications:** a fixed catalog — motion, stalled capture, storage reserve, and failed export — can be delivered as a signed webhook or as local SMTP mail. No macros or custom commands.
-- **Web interface:** responsive desktop and mobile layouts, dark/light themes, English/German localization, a single live view, a JPEG wall for every camera, and the supplied CamPiX branding. No frontend build or external CDN is required.
+- **Web interface:** responsive desktop and mobile layouts, dark/light themes, English/German localization, sensor controls reported by the camera, drawable motion regions, a single live view, a JPEG wall for every camera, and the supplied CamPiX branding. No frontend build or external CDN is required.
 
 ## Schedules
 
@@ -68,7 +68,7 @@ curl -fsSL https://raw.githubusercontent.com/DensenDeluxe/CamPiX/main/install.sh
 
 Run the installer as your normal user, in an interactive terminal. It requests elevation for system-package operations. The entrypoint resolves the requested Git reference once and installs from a fresh detached checkout. `CAMPIX_REF` selects an explicit tag or commit for an application release; the default follows `main`.
 
-After successful setup and service startup, open <http://127.0.0.1:8080>. Raspberry Pi and Debian-family systems use a native package and systemd. Other supported profiles use a private installation and start at user login through a systemd user service, macOS LaunchAgent, or limited Windows scheduled task. Windows detects USB and integrated webcams through FFmpeg's DirectShow input; macOS supports network sources. Local Picamera2 and V4L2 capture require Linux.
+After successful setup and service startup, open <http://127.0.0.1:8080>. Raspberry Pi and Debian-family systems use a native package and systemd. Other supported profiles use a private installation and start at user login through a systemd user service, macOS LaunchAgent, or limited Windows scheduled task. Windows detects USB and integrated webcams through FFmpeg's DirectShow input. macOS detects local cameras through FFmpeg's AVFoundation input and also accepts network sources. Local Picamera2 and V4L2 capture require Linux.
 
 For download-and-inspect commands, supported profiles, offline planning, backups, and recovery, see [installation and operations](docs/DEPLOYMENT.md). The installer can discover a board and devices, but physical-camera compatibility and performance still require validation on that host.
 
@@ -91,6 +91,7 @@ Always open the interface through `campixd`. Opening `dist/index.html` directly 
 | Raspberry Pi CSI; libcamera-compatible official or third-party modules | Picamera2/libcamera                                                   | Host drivers, sensor tuning, controls, and performance must be tested on the actual combination. |
 | USB/UVC or a standard Linux capture device                             | V4L2 compressed capture or OpenCV with `v4l2-ctl` controls            | Available formats and controls depend on the device and driver.                                  |
 | USB or integrated webcam on Windows                                    | FFmpeg DirectShow input at the native sizes the device reports        | Modes depend on the device and driver; no image controls; one integrated webcam measured.        |
+| USB or integrated camera on macOS                                      | FFmpeg AVFoundation input at a numeric device index                   | Discovery lists devices. Image controls and physical qualification are separate.                 |
 | IP camera or network stream                                            | FFmpeg RTSP/HTTP(S) decoder                                           | Reconnection is implemented; individual camera models still require qualification.               |
 | Existing legacy installation                                           | Local JPEG preview and a restricted authenticated HTTP command facade | Not a complete MMAL/FIFO daemon or migration/import tool.                                        |
 | Synthetic input                                                        | Explicit `--demo` adapter                                             | Software test input, never evidence of physical camera compatibility.                            |

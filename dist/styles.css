@@ -2903,3 +2903,52 @@ button:disabled {
     padding: 0 8px;
   }
 }
+#motion-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+.ptz-pad {
+  display: grid;
+  grid-template-columns: repeat(5, auto);
+  gap: 4px;
+}
+.region-stage {
+  position: relative;
+  width: min(100%, 440px);
+  margin: 8px 20px;
+  aspect-ratio: 16 / 9;
+  background: rgba(7, 223, 241, 0.08);
+  border: 1px solid var(--line);
+  touch-action: none;
+}
+.region-box {
+  position: absolute;
+  border: 1px solid var(--cyan);
+  background: rgba(7, 223, 241, 0.18);
+}
+.media-filter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.media-bulk {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0;
+}
+.gallery-check {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 2;
+}
+.gallery-card,
+.media-card {
+  position: relative;
+}

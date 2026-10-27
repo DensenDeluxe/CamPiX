@@ -7,7 +7,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 class Database:
@@ -57,7 +57,12 @@ class Database:
             attempts INTEGER NOT NULL DEFAULT 0, next_attempt REAL NOT NULL,
             last_error TEXT NOT NULL DEFAULT '');
           CREATE INDEX IF NOT EXISTS notification_due ON notification_outbox(status, next_attempt);
-          PRAGMA user_version=3;
+          CREATE TABLE IF NOT EXISTS share_links (
+            id TEXT PRIMARY KEY, token_hash TEXT UNIQUE NOT NULL, media_id TEXT NOT NULL,
+            expires REAL NOT NULL, created REAL NOT NULL, created_by TEXT NOT NULL,
+            revoked INTEGER NOT NULL DEFAULT 0);
+          CREATE INDEX IF NOT EXISTS share_media ON share_links(media_id);
+          PRAGMA user_version=4;
         """)
         path.chmod(0o600)
 

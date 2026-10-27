@@ -129,7 +129,13 @@
           <section class="view active" data-view-panel="overview">
             <div class="page-intro">
               <div>
-                <p class="eyebrow" id="current-date"></p>
+                <p
+                  class="eyebrow"
+                  id="current-date"
+                  data-i18n="eyebrowOverview"
+                >
+                  ÜBERSICHT
+                </p>
                 <h1 data-i18n="controlCenter">Kamera-Kontrollzentrum</h1>
                 <p class="subhead" id="system-summary"></p>
               </div>
@@ -244,7 +250,11 @@
                   </div>
                 </div>
                 <div class="live-stage" id="live-stage">
-                  <img id="live-image" alt="Live camera" hidden /><video
+                  <img id="live-image" alt="Live camera" hidden /><canvas
+                    id="motion-overlay"
+                    hidden
+                  ></canvas
+                  ><video
                     id="live-video"
                     autoplay
                     muted
@@ -298,6 +308,39 @@
                     ><span id="actual-transport"></span>
                   </div>
                   <div class="toolbar-actions">
+                    <div id="ptz-pad" class="ptz-pad" hidden>
+                      <button
+                        type="button"
+                        class="button ghost"
+                        data-ptz="0,-1"
+                      >
+                        ↑</button
+                      ><button
+                        type="button"
+                        class="button ghost"
+                        data-ptz="-1,0"
+                      >
+                        ←</button
+                      ><button
+                        type="button"
+                        class="button ghost"
+                        data-ptz="stop"
+                      >
+                        ■</button
+                      ><button
+                        type="button"
+                        class="button ghost"
+                        data-ptz="1,0"
+                      >
+                        →</button
+                      ><button
+                        type="button"
+                        class="button ghost"
+                        data-ptz="0,1"
+                      >
+                        ↓
+                      </button>
+                    </div>
                     <button
                       class="button ghost"
                       id="audio-toggle"
@@ -327,7 +370,7 @@
               <aside class="panel camera-panel">
                 <div class="panel-header compact">
                   <div>
-                    <p class="eyebrow">CAMERA</p>
+                    <p class="eyebrow" data-i18n="eyebrowCamera">KAMERA</p>
                     <h3 data-i18n="controls">Kamerasteuerung</h3>
                   </div>
                 </div>
@@ -386,8 +429,40 @@
                     aria-label="Lens position"
                   />
                 </div>
+                <div class="control-section" data-control="contrast">
+                  <div class="control-heading">
+                    <span data-i18n="contrast">Kontrast</span
+                    ><output id="contrast-output"></output>
+                  </div>
+                  <input
+                    class="range cyan-range"
+                    id="contrast-range"
+                    type="range"
+                    min="0"
+                    max="4"
+                    step=".05"
+                    value="1"
+                    aria-label="Contrast"
+                  />
+                </div>
+                <div class="control-section" data-control="saturation">
+                  <div class="control-heading">
+                    <span data-i18n="saturation">Sättigung</span
+                    ><output id="saturation-output"></output>
+                  </div>
+                  <input
+                    class="range violet-range"
+                    id="saturation-range"
+                    type="range"
+                    min="0"
+                    max="4"
+                    step=".05"
+                    value="1"
+                    aria-label="Saturation"
+                  />
+                </div>
                 <label class="control-row" data-control="autofocus"
-                  ><span>Autofocus</span
+                  ><span data-i18n="autofocus">Autofokus</span
                   ><input type="checkbox" id="autofocus-checkbox"
                 /></label>
                 <p
@@ -438,7 +513,7 @@
           <section class="view" data-view-panel="media">
             <div class="page-intro">
               <div>
-                <p class="eyebrow">MEDIA LIBRARY</p>
+                <p class="eyebrow" data-i18n="eyebrowMedia">MEDIENBIBLIOTHEK</p>
                 <h1 data-i18n="media">Medien</h1>
                 <p class="subhead" data-i18n="mediaHint">
                   Gespeicherte Fotos und abgeschlossene Aufnahmen.
@@ -475,6 +550,54 @@
                   aria-label="Medien suchen"
                 />
               </div>
+              <label class="media-filter"
+                ><span data-i18n="camera">Kamera</span
+                ><select id="media-camera">
+                  <option value="" data-i18n="allCameras">Alle Kameras</option>
+                </select></label
+              >
+              <label class="media-filter"
+                ><span data-i18n="fromDate">Von</span
+                ><input id="media-from" type="date" /></label
+              ><label class="media-filter"
+                ><span data-i18n="toDate">Bis</span
+                ><input id="media-to" type="date"
+              /></label>
+            </div>
+            <div class="media-bulk" id="media-bulk" hidden>
+              <button
+                class="button soft"
+                id="bulk-lock"
+                type="button"
+                data-i18n="lock"
+              >
+                Sperren
+              </button>
+              <button
+                class="button ghost"
+                id="bulk-unlock"
+                type="button"
+                data-i18n="unlock"
+              >
+                Entsperren
+              </button>
+              <button
+                class="button ghost"
+                id="bulk-delete"
+                type="button"
+                data-i18n="delete"
+              >
+                Löschen
+              </button>
+              <button
+                class="button ghost"
+                id="recover-button"
+                type="button"
+                data-admin
+                data-i18n="recover"
+              >
+                Unterbrochene Aufnahmen prüfen
+              </button>
             </div>
             <div class="media-grid" id="media-grid"></div>
             <div class="pagination">
@@ -486,7 +609,9 @@
           <section class="view" data-view-panel="scheduler">
             <div class="page-intro">
               <div>
-                <p class="eyebrow">AUTOMATION</p>
+                <p class="eyebrow" data-i18n="eyebrowAutomation">
+                  AUTOMATISIERUNG
+                </p>
                 <h1 data-i18n="scheduler">Zeitpläne</h1>
                 <p class="subhead" data-i18n="scheduleHint">
                   Fotos und zeitbegrenzte Aufnahmen mit gespeicherten Regeln.
@@ -506,7 +631,7 @@
           <section class="view" data-view-panel="devices">
             <div class="page-intro">
               <div>
-                <p class="eyebrow">CAPABILITIES</p>
+                <p class="eyebrow" data-i18n="eyebrowDevices">FÄHIGKEITEN</p>
                 <h1 data-i18n="devices">Kameras</h1>
                 <p class="subhead" data-i18n="devicesHint">
                   Erkannte Fähigkeiten und tatsächlicher Verbindungsstatus.
@@ -536,7 +661,7 @@
           <section class="view" data-view-panel="settings">
             <div class="page-intro">
               <div>
-                <p class="eyebrow">CONFIGURATION</p>
+                <p class="eyebrow" data-i18n="eyebrowSettings">KONFIGURATION</p>
                 <h1 data-i18n="settings">Einstellungen</h1>
                 <p class="subhead" data-i18n="settingsHint">
                   Kameraprofile, Speicher und Zugriffsrechte.
@@ -559,6 +684,34 @@
             >
               Administratorrechte erforderlich.
             </p>
+            <form class="panel settings-form" id="password-form">
+              <div class="panel-header">
+                <h3 data-i18n="changePassword">Passwort ändern</h3>
+                <button class="button primary" data-i18n="save">
+                  Speichern
+                </button>
+              </div>
+              <div class="form-grid">
+                <label
+                  ><span data-i18n="currentPassword">Aktuelles Passwort</span
+                  ><input
+                    id="current-password"
+                    type="password"
+                    autocomplete="current-password"
+                    minlength="1"
+                    required /></label
+                ><label
+                  ><span data-i18n="newPassword">Neues Passwort (12+)</span
+                  ><input
+                    id="new-password"
+                    type="password"
+                    autocomplete="new-password"
+                    minlength="12"
+                    maxlength="128"
+                    required
+                /></label>
+              </div>
+            </form>
             <div id="admin-settings" data-admin>
               <form class="panel settings-form" id="camera-settings-form">
                 <div class="panel-header">
@@ -584,7 +737,8 @@
                       <option value="3840x2160">3840 × 2160</option>
                     </select></label
                   ><label
-                    >FPS<input
+                    ><span data-i18n="fps">Bilder pro Sekunde</span
+                    ><input
                       id="setting-fps"
                       type="number"
                       min="1"
@@ -600,7 +754,8 @@
                       <option value="libx264">Software · libx264</option>
                     </select></label
                   ><label
-                    >Pre-roll (s)<input
+                    ><span data-i18n="preroll">Pre-Roll (Sekunden)</span
+                    ><input
                       id="setting-preroll"
                       type="number"
                       min="0"
@@ -608,7 +763,9 @@
                       required
                       value="3" /></label
                   ><label
-                    >Motion threshold (0–1)<input
+                    ><span data-i18n="motionThreshold"
+                      >Bewegungsschwelle (0–1)</span
+                    ><input
                       id="setting-motion-threshold"
                       type="number"
                       min=".005"
@@ -622,6 +779,18 @@
                       >Bewegungserkennung</span
                     ></label
                   ><label class="checkbox-label"
+                    ><input id="setting-timestamp" type="checkbox" /><span
+                      data-i18n="timestamp"
+                      >Zeitstempel auf JPEG</span
+                    ></label
+                  ><label
+                    ><span data-i18n="viewers">Sichtbare Benutzer</span
+                    ><input
+                      id="setting-viewers"
+                      maxlength="512"
+                      autocomplete="off"
+                      placeholder="leer = alle" /></label
+                  ><label class="checkbox-label"
                     ><input id="setting-audio" type="checkbox" /><span
                       data-i18n="audio"
                       >Ton</span
@@ -632,7 +801,9 @@
                       id="setting-audio-source"
                       maxlength="256"
                       autocomplete="off"
+                      list="audio-devices"
                   /></label>
+                  <datalist id="audio-devices"></datalist>
                 </div>
                 <div id="motion-mask-block">
                   <p class="control-note" data-i18n="motionMask">
@@ -648,6 +819,78 @@
                     Helle Zellen werden ausgewertet. Dunkle Zellen ignoriert die
                     Erkennung, zum Beispiel Bäume oder eine Uhr. Ein langsames
                     Hintergrundmodell gleicht Lichtwechsel aus.
+                  </p>
+                  <div id="region-block">
+                    <p class="control-note" data-i18n="regions">
+                      Bewegungszonen
+                    </p>
+                    <div
+                      id="region-stage"
+                      class="region-stage"
+                      role="application"
+                      aria-label="Motion regions"
+                    ></div>
+                    <button
+                      class="button ghost"
+                      id="region-clear"
+                      type="button"
+                      data-i18n="clearRegions"
+                    >
+                      Zonen leeren
+                    </button>
+                    <p class="control-note" data-i18n="regionsHint">
+                      Ziehe bis zu acht Rechtecke. Ohne Zone gilt das ganze
+                      Bild, abzüglich der dunklen Zellen.
+                    </p>
+                  </div>
+                  <div id="ptz-settings">
+                    <label class="checkbox-label"
+                      ><input id="setting-ptz" type="checkbox" /><span
+                        data-i18n="ptz"
+                        >PTZ über ONVIF</span
+                      ></label
+                    >
+                    <label
+                      ><span data-i18n="ptzPort">ONVIF-Port</span
+                      ><input
+                        id="setting-ptz-port"
+                        type="number"
+                        min="1"
+                        max="65535"
+                        value="80" /></label
+                    ><label
+                      ><span data-i18n="ptzUser">ONVIF-Benutzer</span
+                      ><input
+                        id="setting-ptz-user"
+                        maxlength="64"
+                        autocomplete="off" /></label
+                    ><label
+                      ><span data-i18n="ptzPassword">ONVIF-Passwort</span
+                      ><input
+                        id="setting-ptz-password"
+                        type="password"
+                        maxlength="128"
+                        autocomplete="new-password" /></label
+                    ><button
+                      class="button ghost"
+                      id="clear-ptz-password"
+                      type="button"
+                    >
+                      PTZ-Passwort entfernen
+                    </button>
+                    <p class="control-note" data-i18n="ptzHint">
+                      Der Dienst spricht nur den Host der Kamera-URL an. Ein
+                      leeres Passwortfeld lässt das gespeicherte Passwort
+                      unverändert.
+                    </p>
+                  </div>
+                  <p
+                    class="control-note"
+                    id="timestamp-note"
+                    data-i18n="timestampHint"
+                  >
+                    Der Zeitstempel liegt auf der JPEG-Vorschau und auf Fotos.
+                    Native H.264-Aufnahmen bleiben ohne Einblendung.
                   </p>
                   <p class="control-note" id="audio-note" data-i18n="audioHint">
                     Ton ist standardmäßig aus und ein eigener Stream. Die
@@ -706,7 +949,43 @@
                       type="url"
                       maxlength="2048"
                       autocomplete="off"
-                      spellcheck="false" /></label
+                      spellcheck="false"
+                  /></label>
+                  <fieldset class="weekday-fields" id="notification-kinds">
+                    <legend data-i18n="notificationKinds">Ereignisse</legend>
+                    <label
+                      ><input
+                        type="checkbox"
+                        value="motion.detected"
+                        checked
+                      /><span data-i18n="kindMotion">Bewegung</span></label
+                    ><label
+                      ><input
+                        type="checkbox"
+                        value="camera.stalled"
+                        checked
+                      /><span data-i18n="kindStalled">Stillstand</span></label
+                    ><label
+                      ><input
+                        type="checkbox"
+                        value="storage.reserve"
+                        checked
+                      /><span data-i18n="kindStorage">Speicher</span></label
+                    ><label
+                      ><input
+                        type="checkbox"
+                        value="export.failed"
+                        checked
+                      /><span data-i18n="kindExport">Export</span></label
+                    >
+                  </fieldset>
+                  <label
+                    ><span data-i18n="notificationCameras">Kameras</span
+                    ><input
+                      id="setting-notification-cameras"
+                      maxlength="512"
+                      autocomplete="off"
+                      placeholder="leer = alle" /></label
                   ><label class="checkbox-label"
                     ><input id="setting-mail" type="checkbox" /><span
                       data-i18n="localMail"
@@ -762,6 +1041,92 @@
                 </p>
                 <ul id="notification-deliveries" class="delivery-list"></ul>
               </form>
+              <form
+                class="panel settings-form"
+                id="integration-form"
+                data-admin
+              >
+                <div class="panel-header">
+                  <h3 data-i18n="integrations">Integrationen</h3>
+                  <button class="button primary" data-i18n="save">
+                    Speichern
+                  </button>
+                </div>
+                <div class="form-grid">
+                  <label class="checkbox-label"
+                    ><input id="setting-onvif" type="checkbox" /><span
+                      data-i18n="onvif"
+                      >ONVIF-Gerät</span
+                    ></label
+                  ><label
+                    ><span data-i18n="onvifUser">ONVIF-Benutzer</span
+                    ><input
+                      id="setting-onvif-user"
+                      maxlength="64"
+                      autocomplete="off" /></label
+                  ><label
+                    ><span data-i18n="onvifPassword">ONVIF-Passwort (12+)</span
+                    ><input
+                      id="setting-onvif-password"
+                      type="password"
+                      maxlength="128"
+                      autocomplete="new-password"
+                  /></label>
+                </div>
+                <p class="control-note" data-i18n="onvifHint">
+                  ONVIF ist aus, bis Benutzer und Passwort gesetzt sind.
+                  PasswordDigest wird abgelehnt. Der RTSP-Pfad ist der
+                  verwaltete MediaMTX-Pfad.
+                </p>
+                <div class="toolbar-actions notification-actions">
+                  <button
+                    class="button ghost"
+                    id="pair-homeassistant"
+                    type="button"
+                  >
+                    Home Assistant koppeln
+                  </button>
+                  <button
+                    class="button ghost"
+                    id="notify-desktop"
+                    type="button"
+                  >
+                    Browser-Hinweise
+                  </button>
+                </div>
+                <p class="control-note" id="pair-token" hidden></p>
+                <ul id="token-list" class="delivery-list"></ul>
+              </form>
+              <form class="panel settings-form" id="import-form" data-admin>
+                <div class="panel-header">
+                  <h3 data-i18n="transfer">Sicherung und Import</h3>
+                </div>
+                <div class="toolbar-actions notification-actions">
+                  <button class="button ghost" id="backup-button" type="button">
+                    Datenbank sichern
+                  </button>
+                  <label class="button ghost"
+                    >Konfiguration importieren<input
+                      id="import-file"
+                      type="file"
+                      accept="application/json,.json"
+                      hidden
+                  /></label>
+                  <label class="button ghost"
+                    >Raspimjpeg lesen<input
+                      id="raspimjpeg-file"
+                      type="file"
+                      accept=".txt,text/plain"
+                      hidden
+                  /></label>
+                </div>
+                <p class="control-note" data-i18n="backupHint">
+                  Die Sicherung enthält Passwort-Hashes und keine Sitzungen.
+                  Medien bleiben ein eigener Ordner. Ein Raspimjpeg-Import
+                  übernimmt nur Größe, Rate und Bewegung und speichert noch
+                  nichts.
+                </p>
+              </form>
               <article class="panel users-panel">
                 <div class="panel-header">
                   <h3 data-i18n="users">Benutzer</h3>
@@ -772,7 +1137,9 @@
                 <div id="users-list"></div>
               </article>
               <article class="panel system-panel">
-                <div class="panel-header"><h3>System</h3></div>
+                <div class="panel-header">
+                  <h3 data-i18n="system">System</h3>
+                </div>
                 <dl id="system-details"></dl>
               </article>
             </div>
@@ -795,6 +1162,7 @@
               <option value="picamera2">Picamera2 / libcamera</option>
               <option value="v4l2">V4L2 / USB</option>
               <option value="dshow">DirectShow / Windows USB</option>
+              <option value="avfoundation">AVFoundation / macOS</option>
               <option value="network">RTSP / HTTP</option>
               <option value="legacy">Legacy JPEG preview</option>
               <option value="synthetic" id="synthetic-option">
@@ -870,6 +1238,15 @@
                 value="0"
                 required /></label
             ><label
+              ><span data-i18n="startMinute">Startminute</span
+              ><input
+                name="start_minute"
+                type="number"
+                min="0"
+                max="59"
+                value="0"
+                required /></label
+            ><label
               ><span data-i18n="endHour">Endstunde</span
               ><input
                 name="end_hour"
@@ -877,6 +1254,15 @@
                 min="0"
                 max="24"
                 value="24"
+                required /></label
+            ><label
+              ><span data-i18n="endMinute">Endminute</span
+              ><input
+                name="end_minute"
+                type="number"
+                min="0"
+                max="59"
+                value="0"
                 required
             /></label>
           </div>
@@ -923,6 +1309,29 @@
             ><span data-i18n="timezone">Zeitzone</span
             ><input name="timezone" required value="Europe/Berlin" /></label
           ><button class="button primary full-button" data-i18n="save">
+            Speichern
+          </button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="user-password-dialog" class="panel app-dialog">
+      <form id="user-password-form">
+        <div class="panel-header">
+          <h3 data-i18n="setPassword">Passwort setzen</h3>
+          <button class="round-control" type="button" data-close>×</button>
+        </div>
+        <div class="dialog-fields">
+          <label
+            ><span data-i18n="newPassword">Neues Passwort (12+)</span
+            ><input
+              name="password"
+              type="password"
+              autocomplete="new-password"
+              minlength="12"
+              maxlength="128"
+              required
+          /></label>
+          <button class="button primary full-button" data-i18n="save">
             Speichern
           </button>
         </div>

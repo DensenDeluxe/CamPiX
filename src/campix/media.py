@@ -76,12 +76,31 @@ class MediaStore:
         item["locked"] = bool(item["locked"])
         return item
 
-    def list(self, limit=100, offset=0, kind=None, camera_id=None, query=""):
+    def list(
+        self,
+        limit=100,
+        offset=0,
+        kind=None,
+        camera_id=None,
+        query="",
+        created_after=None,
+        created_before=None,
+        exclude_cameras=(),
+    ):
         clauses, args = [], []
         for key, value in (("kind", kind), ("camera_id", camera_id)):
             if value:
                 clauses.append(key + "=?")
                 args.append(value)
+        if created_after is not None:
+            clauses.append("created>=?")
+            args.append(created_after)
+        if created_before is not None:
+            clauses.append("created<=?")
+            args.append(created_before)
+        if exclude_cameras:
+            clauses.append("camera_id NOT IN (" + ",".join("?" * len(exclude_cameras)) + ")")
+            args.extend(exclude_cameras)
         if query:
             # User text is a literal substring. LIKE wildcards must not widen the match.
             literal = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
@@ -113,6 +132,23 @@ class MediaStore:
                     trash.replace(path)
                 raise
             trash.unlink(missing_ok=True)
+
+    def apply_many(self, media_ids, action):
+        if action not in {"lock", "unlock", "delete"}:
+            raise StorageError("Media action is not allowed")
+        results = []
+        for media_id in media_ids:
+            try:
+                if action == "delete":
+                    self.delete(media_id)
+                else:
+                    self.set_locked(media_id, action == "lock")
+                results.append({"id": media_id, "ok": True})
+            except KeyError:
+                results.append({"id": media_id, "ok": False, "error": "Resource not found"})
+            except StorageError as exc:
+                results.append({"id": media_id, "ok": False, "error": str(exc)})
+        return {"results": results}
 
     def set_locked(self, media_id, locked):
         with self.lock:

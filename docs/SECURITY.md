@@ -23,7 +23,9 @@ CamPiX does not replace a hardened operating system. Administrators define camer
 
 ## Trust boundaries and remaining hardening
 
-All roles currently share one media library. There is no tenant isolation or per-user private media ownership. Operators can permanently delete unlocked media. Audit events are operational records, not tamper-proof compliance logs.
+By default all roles share one media library. A camera may name viewer accounts that are allowed to see it; other viewers then receive not-found for that camera, its media, and its events. Operators and administrators are not limited by that list. Operators can permanently delete unlocked media. An operator can also create a single-file share link. The raw token is returned once, stored only as a SHA-256 digest, and expires. The link is a bearer URL, so treat access logs as sensitive. Audit events are operational records, not tamper-proof compliance logs.
+
+Optional ONVIF stores only an Argon2 password hash. Network PTZ stores the camera password in the private database, the same way a network source URL can contain credentials. Neither value is included in configuration export. A database backup still contains password hashes, token digests, and those private camera fields. The downloadable backup removes active sessions and does not include media files.
 
 Administrator-defined camera sources can contact private networks or open an existing local legacy JPEG file. Do not grant these rights to untrusted users. Operators must keep FFmpeg, libcamera, and camera drivers patched. Host users with data-directory access can read password hashes and camera credentials and reset an account locally; that access is outside the web authentication boundary.
 
