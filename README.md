@@ -16,7 +16,7 @@ CamPiX is the camera appliance for Raspberry Pi and Linux, with webcams on Windo
 
 ## Every camera
 
-![CamPiX wall with driveway, porch, garden, and workshop cameras](docs/media/interface-wall.webp)
+![CamPiX wall with driveway, porch, garden, and workshop cameras in daylight](docs/media/cameras-day.webp)
 
 ## Recording
 
