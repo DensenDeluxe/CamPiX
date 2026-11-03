@@ -1002,7 +1002,7 @@ test("library dates and AVFoundation presets use local operator values", async (
       const end = new Date(2026, 5, 16);
       return {
         after: String(Math.floor(start.getTime() / 1000)),
-        before: String(Math.floor(end.getTime() / 1000) - 1),
+        before: String(Math.floor(end.getTime() / 1000)),
       };
     });
     expect(params.get("created_after")).toBe(expected.after);

@@ -5,6 +5,7 @@ import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -280,6 +281,36 @@ def test_recovery_indexes_finalized_files_missing_from_the_library(client, appli
         assert results[video_name]["ok"] is True
 
 
+def test_recovered_file_keeps_its_source_camera_and_hides_an_unknown_source(client, application):
+    signin(client)
+    root = application.state.store.root
+    owned_id = "ab" * 16
+    owned_name = f"20261103_020304_{owned_id}.jpg"
+    owned = root / owned_name
+    owned.write_bytes(b"\xff\xd8\xff\xd9")
+    application.state.store.remember_camera(owned, "demo")
+    loose_id = "cd" * 16
+    loose_name = f"20261103_020305_{loose_id}.jpg"
+    (root / loose_name).write_bytes(b"\xff\xd8\xff\xd9")
+    assert client.post("/api/v1/media/recovery").status_code == 202
+    _wait_recovery(client)
+    library = {item["id"]: item for item in client.get("/api/v1/media").json()["items"]}
+    assert library[owned_id]["camera_id"] == "demo"
+    assert library[loose_id]["camera_id"] == "recovered"
+    assert not (root / f"{owned_name}.camera").exists()
+    signin(client, "viewer")
+    visible = {item["id"] for item in client.get("/api/v1/media").json()["items"]}
+    assert owned_id in visible
+    assert loose_id not in visible
+    assert client.get(f"/api/v1/media/{loose_id}/file").status_code == 404
+    signin(client, "admin")
+    assert client.patch("/api/v1/cameras/demo", json={"viewer_users": ["admin"]}).status_code == 200
+    signin(client, "viewer")
+    hidden = {item["id"] for item in client.get("/api/v1/media").json()["items"]}
+    assert owned_id not in hidden
+    assert client.get(f"/api/v1/media/{owned_id}/file").status_code == 404
+
+
 def test_os_lock_excludes_second_process_and_recovers(tmp_path):
     lock = ProcessLock(tmp_path)
     lock.acquire()
@@ -416,6 +447,61 @@ def test_encoder_failure_never_indexes_success(client, application, monkeypatch)
     assert application.state.db.one("SELECT id FROM events WHERE kind='recording.error'")
 
 
+def test_legacy_recorder_does_not_index_an_exit_zero_file_without_a_container(tmp_path, monkeypatch):
+    class _Stdin:
+        closed = False
+
+        def write(self, data):
+            return len(data)
+
+        def close(self):
+            self.closed = True
+
+    class _Process:
+        def __init__(self, path):
+            self.path = Path(path)
+            self.stdin = _Stdin()
+            self.returncode = None
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
+            self.path.write_bytes(b"not-a-valid-mp4")
+            self.returncode = 0
+            return 0
+
+        def terminate(self):
+            self.returncode = 0
+
+        def kill(self):
+            self.returncode = 0
+
+    monkeypatch.setattr(
+        "campix.recording.subprocess.Popen",
+        lambda command, **kwargs: _Process(command[-1]),
+    )
+    events, saved = [], []
+    store = SimpleNamespace(
+        reserve=lambda extension, camera_id=None: ("legacyfile", tmp_path / "legacy.mp4"),
+        bus=SimpleNamespace(publish=lambda *args: events.append(args)),
+        register=lambda *args: saved.append(args),
+        check_space=lambda: None,
+    )
+    recorder = Recorder(
+        SimpleNamespace(id="legacy", fps=10, preroll_seconds=0, encoder="libx264", width=16, height=16),
+        SimpleNamespace(ffmpeg="ffmpeg"),
+        store,
+        [],
+    )
+    recorder.offer(b"\xff\xd8\xff\xd9")
+    with pytest.raises(RuntimeError, match="Recording failed"):
+        recorder.stop()
+    assert not saved
+    assert events and events[0][0] == "recording.error"
+    assert (tmp_path / "legacy.mp4").exists() is False
+
+
 def test_encoder_failure_without_incoming_frames_is_observed(tmp_path, monkeypatch):
     spawn = subprocess.Popen
     monkeypatch.setattr(
@@ -424,7 +510,7 @@ def test_encoder_failure_without_incoming_frames_is_observed(tmp_path, monkeypat
     )
     events, saved = [], []
     store = SimpleNamespace(
-        reserve=lambda extension: ("interrupted", tmp_path / "interrupted.mp4"),
+        reserve=lambda extension, camera_id=None: ("interrupted", tmp_path / "interrupted.mp4"),
         bus=SimpleNamespace(publish=lambda *args: events.append(args)),
         register=lambda *args: saved.append(args),
     )

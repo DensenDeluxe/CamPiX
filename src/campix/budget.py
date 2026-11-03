@@ -39,14 +39,16 @@ def admission_reason(
     pixels = width * height
     if memory_total < 0:
         raise ValueError("memory_total must be nonnegative")
+    if memory_total == 0:
+        return "Host memory is unavailable, so this profile cannot be admitted"
     # Rough resident set: a short JPEG window plus the encoded hub, per camera.
     estimate = pixels * 2 + 48 * _MIB
-    if memory_total and estimate * camera_count + 96 * _MIB > memory_total:
+    if estimate * camera_count + 96 * _MIB > memory_total:
         return "This profile exceeds the host memory budget for the configured cameras"
-    if memory_total and memory_total <= 512 * _MIB:
+    if memory_total <= 512 * _MIB:
         if camera_count > 1 or pixels > 1280 * 720 or fps > 15:
             return "This host memory budget allows one camera up to 1280x720 at 15 FPS"
-    elif memory_total and memory_total <= 1024 * _MIB:
+    elif memory_total <= 1024 * _MIB:
         if pixels > 1920 * 1080 or fps > 30:
             return "This host memory budget allows at most 1920x1080 at 30 FPS"
         if camera_count > 1 and (pixels > 1280 * 720 or fps > 30):

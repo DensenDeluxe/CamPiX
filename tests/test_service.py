@@ -279,6 +279,101 @@ def test_overlapping_recording_is_skipped_until_the_take_can_finish(client, appl
     assert legacy >= before + 29
 
 
+def test_scheduled_recording_completes_only_after_the_file_is_indexed(client, application):
+    signin(client)
+    _quiet_scheduler(application)
+    saved = client.post(
+        "/api/v1/schedules",
+        json={
+            "id": "take",
+            "name": "Take",
+            "camera_id": "demo",
+            "action": "record",
+            "interval_seconds": 60,
+            "duration_seconds": 5,
+        },
+    )
+    assert saved.status_code == 201, saved.text
+    media_id = "ab" * 16
+    camera = application.state.cameras.get("demo")
+    camera.start_recording = lambda duration=None, trigger="manual": {
+        "recording": True,
+        "media_id": media_id,
+    }
+    application.state.db.execute(
+        "UPDATE schedules SET next_run=? WHERE id='take'", (time.time() - 1,)
+    )
+    application.state.scheduler.tick()
+    kinds = [
+        row["kind"]
+        for row in application.state.db.all("SELECT kind FROM events WHERE kind LIKE 'schedule.%'")
+    ]
+    assert kinds == []
+    application.state.bus.publish(
+        "recording.error",
+        "Recording failed (RuntimeError); media retained for recovery",
+        "demo",
+        {"media_id": media_id, "trigger": "schedule:take"},
+    )
+    failed = [
+        row["kind"]
+        for row in application.state.db.all("SELECT kind FROM events WHERE kind LIKE 'schedule.%'")
+    ]
+    assert failed == ["schedule.error"]
+    application.state.db.execute(
+        "UPDATE schedules SET next_run=? WHERE id='take'", (time.time() - 1,)
+    )
+    application.state.scheduler.tick()
+    application.state.bus.publish(
+        "media.saved",
+        "Video saved",
+        "demo",
+        {"media_id": media_id, "trigger": "schedule:take"},
+    )
+    finished = [
+        row["kind"]
+        for row in application.state.db.all(
+            "SELECT kind FROM events WHERE kind LIKE 'schedule.%' ORDER BY id"
+        )
+    ]
+    assert finished == ["schedule.error", "schedule.completed"]
+
+
+def test_schedule_update_without_enabled_keeps_a_paused_rule(client, application):
+    signin(client)
+    _quiet_scheduler(application)
+    created = client.post(
+        "/api/v1/schedules",
+        json={"id": "pause", "name": "Pause", "camera_id": "demo"},
+    )
+    assert created.status_code == 201, created.text
+    assert created.json()["enabled"] is True
+    paused = client.post(
+        "/api/v1/schedules",
+        json={key: value for key, value in created.json().items() if key != "next_run"}
+        | {"enabled": False},
+    )
+    assert paused.json()["enabled"] is False
+    omitted = {
+        key: value
+        for key, value in paused.json().items()
+        if key not in {"next_run", "enabled"}
+    }
+    kept = client.post("/api/v1/schedules", json=omitted | {"name": "Still paused"})
+    assert kept.status_code == 201, kept.text
+    assert kept.json()["enabled"] is False
+    application.state.db.execute(
+        "UPDATE schedules SET next_run=? WHERE id='pause'", (time.time() - 100,)
+    )
+    stored = client.get("/api/v1/schedules").json()[0]["next_run"]
+    again = client.post(
+        "/api/v1/schedules",
+        json={key: value for key, value in kept.json().items() if key not in {"next_run", "enabled"}},
+    )
+    assert again.json()["enabled"] is False
+    assert again.json()["next_run"] == stored
+
+
 def test_overnight_window_uses_previous_weekday():
     import datetime as dt
     from zoneinfo import ZoneInfo
@@ -388,6 +483,9 @@ def test_websocket_auth_and_events(client, application):
         with client.websocket_connect(
             "/api/v1/events/ws", headers={"Origin": "https://evil.invalid"}
         ):
+            pass
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect("/api/v1/events/ws"):
             pass
 
 

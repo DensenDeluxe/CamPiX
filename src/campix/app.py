@@ -356,11 +356,14 @@ def create_app(settings: Settings | None = None):
     def hidden_cameras(user) -> list[str]:
         if user["role"] != "viewer":
             return []
-        return [
+        hidden = [
             item["id"]
             for item in cameras.list()
             if item.get("viewer_users") and user["username"] not in item["viewer_users"]
         ]
+        # Files recovered without a source camera are not part of any allow-list.
+        hidden.append("recovered")
+        return hidden
 
     def view_camera(user, camera_id):
         camera = cameras.get(camera_id)
@@ -501,6 +504,7 @@ def create_app(settings: Settings | None = None):
             "Network source must be an RTSP or HTTP(S) camera URL",
             "GStreamer vendor pipelines require an installed adapter; arbitrary pipelines are disabled",
             "Legacy source must be an absolute preview JPEG path",
+            "Camera id is reserved",
             "Unsupported or non-finite control",
             "Control value is outside the allowed range",
             "Each snapshot may be selected once",
@@ -1266,7 +1270,12 @@ def create_app(settings: Settings | None = None):
     @app.websocket("/api/v1/events/ws")
     async def event_socket(ws: WebSocket):
         token = ws.cookies.get("campix_session")
-        if not auth.session(token) or not auth.origin_allowed(ws.headers.get("origin"), ws.url):
+        origin = ws.headers.get("origin")
+        if (
+            not origin
+            or not auth.session(token)
+            or not auth.origin_allowed(origin, ws.url)
+        ):
             await ws.close(code=1008)
             return
         await ws.accept()

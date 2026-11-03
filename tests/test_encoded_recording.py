@@ -26,7 +26,7 @@ def store(tmp_path):
     saved, events, reserved = [], [], []
     path = tmp_path / "test-only.mp4"
 
-    def reserve(extension):
+    def reserve(extension, camera_id=None):
         reserved.append(extension)
         return "test-only", path
 
@@ -274,7 +274,7 @@ def test_unready_stream_and_failed_reservation_leave_no_subscription(monkeypatch
     assert not media.reserved
     seed(hub)
 
-    def reserve(extension):
+    def reserve(extension, camera_id=None):
         raise OSError("No storage space")
 
     media.reserve = reserve

@@ -60,7 +60,7 @@ class ExportService:
         return row
 
     def _encode(self, items, fps):
-        media_id, destination = self.store.reserve("mp4")
+        media_id, destination = self.store.reserve("mp4", items[0]["camera_id"])
         partial = destination.with_suffix(".mp4.partial")
         command = [
             self.settings.ffmpeg,

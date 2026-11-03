@@ -1554,7 +1554,7 @@
     return card;
   }
   function localDayBounds(value) {
-    // A date input is a local calendar day. Date.parse("YYYY-MM-DD") is UTC midnight.
+    // A date input is a local calendar day. The API treats created_before as exclusive.
     const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value || "");
     if (!match) return null;
     const year = Number(match[1]);
@@ -1572,7 +1572,7 @@
       return null;
     return {
       after: Math.floor(start.getTime() / 1000),
-      before: Math.floor(end.getTime() / 1000) - 1,
+      before: Math.floor(end.getTime() / 1000),
     };
   }
   function mediaPath({ limit, offset, kind = "", query = "" }) {

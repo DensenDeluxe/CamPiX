@@ -113,8 +113,9 @@ class RecoveryService:
             if not duration or duration <= 0:
                 return {"file": path.name, "ok": False, "error": "Recovered file has no duration"}
             kind = "video"
+        camera_id = self.store.source_camera(path) or "recovered"
         try:
-            self.store.register(media_id, path, "recovered", kind, "recovery", duration)
+            self.store.register(media_id, path, camera_id, kind, "recovery", duration)
         except Exception:
             # The finalized file is the only copy. A failed insert must not delete it.
             existing = self.store.db.one("SELECT id FROM media WHERE id=?", (media_id,))
@@ -164,8 +165,9 @@ class RecoveryService:
             repair.unlink(missing_ok=True)
             return {"file": partial.name, "ok": False, "error": "Recovered file has no duration"}
         repair.replace(target)
+        camera_id = self.store.source_camera(target) or "recovered"
         try:
-            self.store.register(media_id, target, "recovered", "video", "recovery", duration)
+            self.store.register(media_id, target, camera_id, "video", "recovery", duration)
         except Exception:
             target.unlink(missing_ok=True)
             return {"file": partial.name, "ok": False, "error": "Recovered file was not indexed"}

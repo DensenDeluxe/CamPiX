@@ -486,7 +486,12 @@ class AudioRecording:
         except Exception as exc:
             self.audio.abort_spool()
             self.error = "Recording failed (audio); media retained for recovery"
-            self.store.bus.publish("recording.error", self.error, self.config.id)
+            self.store.bus.publish(
+                "recording.error",
+                self.error,
+                self.config.id,
+                {"media_id": self.inner.media_id, "trigger": self.trigger},
+            )
             LOG.warning("Audio finalize for %s failed: %s", self.config.id, type(exc).__name__)
             self.finished.set()
             raise RuntimeError(self.error) from exc
