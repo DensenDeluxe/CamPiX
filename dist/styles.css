@@ -2939,8 +2939,16 @@ button:disabled {
 .media-bulk {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 8px;
   margin: 12px 0;
+}
+#media-selected {
+  color: var(--muted);
+  font-size: 12px;
+}
+#media-select-all {
+  white-space: nowrap;
 }
 .gallery-check {
   position: absolute;

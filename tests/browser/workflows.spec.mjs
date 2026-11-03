@@ -739,6 +739,79 @@ test("library search reaches older photos and timelapse uses the match", async (
   expect(exported.media_ids).toContain(older.id);
 });
 
+test("library select all covers every filtered page", async ({ page }) => {
+  test.setTimeout(90000);
+  await signin(page, "operator");
+  const session = await page.request.get("/api/v1/auth/me");
+  expect(session.ok()).toBeTruthy();
+  const { csrf } = await session.json();
+  for (let index = 0; index < 25; index += 1) {
+    const response = await page.request.post("/api/v1/cameras/demo/snapshot", {
+      headers: { "X-CSRF-Token": csrf },
+    });
+    expect(response.ok()).toBeTruthy();
+  }
+  await page.locator(".nav-item[data-view=media]").click();
+  await expect(page.locator("#media-select-all")).toBeVisible();
+  await expect(page.locator("#media-grid .gallery-card")).toHaveCount(24);
+  const total = Number(
+    (await page.locator("#media-page").textContent()).split("·")[1].trim(),
+  );
+  expect(total).toBeGreaterThan(24);
+  await page.locator("#media-select-all").click();
+  await expect(page.locator("#media-selected")).toHaveText(
+    `${total} ausgewählt`,
+  );
+  await expect(page.locator("#media-select-all")).toHaveText(
+    "Auswahl aufheben",
+  );
+  await expect(page.locator("#media-grid .gallery-check:checked")).toHaveCount(
+    24,
+  );
+  await page.locator("#media-next").click();
+  await expect(page.locator("#media-grid .gallery-check:checked")).toHaveCount(
+    Math.min(24, total - 24),
+  );
+  await page.locator("#media-search").fill("no-such-campix-media");
+  await expect(page.locator("#media-select-all")).toBeHidden();
+  await expect(page.locator("#media-bulk")).toBeHidden();
+  await page.locator("#media-search").fill("");
+  await expect(page.locator("#media-select-all")).toBeVisible();
+  await expect(page.locator("#media-page")).toContainText(String(total));
+  await page.locator("#media-select-all").click();
+  await expect(page.locator("#media-selected")).toHaveText(
+    `${total} ausgewählt`,
+  );
+  const posted = [];
+  await page.route("**/api/v1/media/actions", async (route) => {
+    const body = route.request().postDataJSON();
+    posted.push(body);
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        results: body.ids.map((id) => ({ id, ok: true })),
+      }),
+    });
+  });
+  await page.locator("#bulk-lock").click();
+  await expect
+    .poll(() => posted.reduce((sum, body) => sum + body.ids.length, 0))
+    .toBe(total);
+  expect(
+    posted.every((body) => body.action === "lock" && body.ids.length <= 100),
+  ).toBeTruthy();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.locator("#media-select-all")).toBeVisible();
+});
+
+test("viewers cannot select the library", async ({ page }) => {
+  await signin(page, "viewer", null);
+  await page.locator(".nav-item[data-view=media]").click();
+  await expect(page.locator("#media-select-all")).toBeHidden();
+  await expect(page.locator(".gallery-check")).toHaveCount(0);
+});
+
 test("theme, language and authenticated downloads", async ({ page }) => {
   await signin(page);
   await page.locator("#language-button").click();
