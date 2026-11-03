@@ -124,8 +124,11 @@ def mail_recipient_valid(value: str) -> bool:
 
 
 def address_allowed(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    # ::1 is both loopback and reserved. Loopback is an explicit webhook target.
+    if ip.is_loopback:
+        return True
     return bool(
-        (ip.is_global or ip.is_private or ip.is_loopback)
+        (ip.is_global or ip.is_private)
         and not (ip.is_multicast or ip.is_unspecified or ip.is_link_local or ip.is_reserved)
     )
 
@@ -149,6 +152,9 @@ def webhook_targets(url: str, timeout: float = 5) -> list[str]:
         if not address_allowed(ip):
             raise ValueError("Webhook address is not allowed")
         if host in LOOPBACK_HOSTS and not ip.is_loopback:
+            raise ValueError("Webhook address is not allowed")
+        # A public name that resolves to loopback can reach local services.
+        if host not in LOOPBACK_HOSTS and ip.is_loopback:
             raise ValueError("Webhook address is not allowed")
         if info[4][0] not in addresses:
             addresses.append(info[4][0])

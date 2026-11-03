@@ -4,7 +4,7 @@ import re
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 EncoderName = Literal[
     "auto",
@@ -162,11 +162,13 @@ class CameraConfig(StrictModel):
     @field_validator("controls")
     @classmethod
     def valid_controls(cls, values):
-        import math
-
-        allowed = {"brightness", "contrast", "saturation", "exposure", "autofocus", "lens_position"}
-        if set(values) - allowed or any(not math.isfinite(float(v)) for v in values.values()):
-            raise ValueError("Unsupported or non-finite control")
+        try:
+            ControlPatch.model_validate(values)
+        except ValidationError as exc:
+            ranged = {"greater_than_equal", "less_than_equal"}
+            if exc.errors() and all(error["type"] in ranged for error in exc.errors()):
+                raise ValueError("Control value is outside the allowed range") from None
+            raise ValueError("Unsupported or non-finite control") from None
         return values
 
 

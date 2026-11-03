@@ -49,6 +49,11 @@ class RecoveryService:
                 if self.halt.is_set():
                     break
                 results.append(self._recover(path))
+            if not self.halt.is_set():
+                for path in self._unindexed():
+                    if self.halt.is_set():
+                        break
+                    results.append(self._index_final(path))
         finally:
             with self.lock:
                 self.status = {"state": "idle", "results": results}
@@ -62,7 +67,7 @@ class RecoveryService:
         known = {row["filename"] for row in self.store.db.all("SELECT filename FROM media")}
         found = []
         for path in sorted(self.store.root.iterdir()):
-            if not path.is_file() or not path.name.endswith(_PARTIAL):
+            if path.is_symlink() or not path.is_file() or not path.name.endswith(_PARTIAL):
                 continue
             final_name = path.name.removesuffix(".partial")
             if final_name in known or (self.store.root / final_name).exists():
@@ -71,6 +76,52 @@ class RecoveryService:
             if len(found) >= _LIMIT:
                 break
         return found
+
+    def _unindexed(self) -> list[Path]:
+        """Finalized files that never received a library row."""
+        known = {row["filename"] for row in self.store.db.all("SELECT filename FROM media")}
+        found = []
+        for path in sorted(self.store.root.iterdir()):
+            if path.is_symlink() or not path.is_file():
+                continue
+            if path.suffix not in {".mp4", ".jpg"} or path.name in known:
+                continue
+            if _media_id(path.name) is None:
+                continue
+            found.append(path)
+            if len(found) >= _LIMIT:
+                break
+        return found
+
+    def _index_final(self, path: Path) -> dict:
+        media_id = _media_id(path.name)
+        if not media_id:
+            return {"file": path.name, "ok": False, "error": "Unrecognized file name"}
+        if path.suffix == ".jpg":
+            if not _jpeg_complete(path):
+                return {"file": path.name, "ok": False, "error": "Recovered file is not a JPEG"}
+            kind, duration = "snapshot", None
+        else:
+            ffmpeg = shutil.which(self.settings.ffmpeg) or self.settings.ffmpeg
+            ffprobe = _ffprobe_path(ffmpeg)
+            if not ffprobe:
+                return {"file": path.name, "ok": False, "error": "ffprobe is not available"}
+            try:
+                duration = _duration(ffprobe, path)
+            except (OSError, subprocess.SubprocessError, ValueError, json.JSONDecodeError):
+                duration = None
+            if not duration or duration <= 0:
+                return {"file": path.name, "ok": False, "error": "Recovered file has no duration"}
+            kind = "video"
+        try:
+            self.store.register(media_id, path, "recovered", kind, "recovery", duration)
+        except Exception:
+            # The finalized file is the only copy. A failed insert must not delete it.
+            existing = self.store.db.one("SELECT id FROM media WHERE id=?", (media_id,))
+            if existing:
+                return {"file": path.name, "ok": True, "media_id": media_id}
+            return {"file": path.name, "ok": False, "error": "Recovered file was not indexed"}
+        return {"file": path.name, "ok": True, "media_id": media_id}
 
     def _recover(self, partial: Path) -> dict:
         media_id = _media_id(partial.name)
@@ -123,11 +174,27 @@ class RecoveryService:
 
 
 def _media_id(name: str) -> str | None:
-    stem = name.removesuffix(_PARTIAL)
-    marker = stem.rpartition("_")[2].removesuffix(".mp4")
-    if len(marker) == 32 and all(char in "0123456789abcdef" for char in marker):
-        return marker
+    # Partial recordings are named "<stamp>_<id>.mp4.partial".
+    stem = name.removesuffix(".partial") if name.endswith(".partial") else name
+    for suffix in (".mp4", ".jpg"):
+        if not stem.endswith(suffix):
+            continue
+        marker = stem[: -len(suffix)].rpartition("_")[2]
+        if len(marker) == 32 and all(char in "0123456789abcdef" for char in marker):
+            return marker
+        return None
     return None
+
+
+def _jpeg_complete(path: Path) -> bool:
+    try:
+        with path.open("rb") as stream:
+            if stream.read(3) != b"\xff\xd8\xff":
+                return False
+            stream.seek(0, 2)
+            return stream.tell() >= 4
+    except OSError:
+        return False
 
 
 def _ffprobe_path(ffmpeg: str) -> str | None:

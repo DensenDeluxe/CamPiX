@@ -126,6 +126,28 @@ def test_validation_error_custom_message_does_not_echo_secrets(client, applicati
     assert response.json()["detail"][0]["loc"] == ["body", "source"]
 
 
+def test_camera_profile_rejects_control_values_outside_the_live_ranges(client):
+    signin(client)
+    response = client.post(
+        "/api/v1/cameras",
+        json={
+            "id": "wide-controls",
+            "name": "Wide controls",
+            "backend": "synthetic",
+            "controls": {"exposure": 999},
+        },
+    )
+    assert response.status_code == 422
+    assert "999" not in response.text
+    assert response.json()["detail"][0]["msg"] == (
+        "Value error, Control value is outside the allowed range"
+    )
+    assert [item["id"] for item in client.get("/api/v1/cameras").json()] == ["demo"]
+    adjusted = client.patch("/api/v1/cameras/demo/controls", json={"exposure": 2})
+    assert adjusted.status_code == 200, adjusted.text
+    assert adjusted.json()["controls"]["exposure"] == 2
+
+
 def test_invalid_camera_without_authentication_remains_unauthorized(client):
     response = client.post(
         "/api/v1/cameras",

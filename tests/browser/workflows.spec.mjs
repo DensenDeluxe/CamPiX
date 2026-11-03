@@ -965,6 +965,56 @@ test("camera wall shows one JPEG per camera and settings keep mask and notificat
   await expect(page.locator("#live-stage")).toBeHidden();
 });
 
+test("library dates and AVFoundation presets use local operator values", async ({
+  browser,
+}) => {
+  const context = await browser.newContext({
+    timezoneId: "Europe/Berlin",
+    viewport: { width: 1440, height: 1050 },
+    baseURL: "http://127.0.0.1:4401",
+  });
+  const page = await context.newPage();
+  try {
+    await signin(page, "admin", null);
+    await page.locator("[data-add-camera]").first().click();
+    await page.locator("#new-camera-backend").selectOption("v4l2");
+    await expect(page.locator("#new-camera-source")).toHaveValue("/dev/video0");
+    await page.locator("#new-camera-backend").selectOption("avfoundation");
+    await expect(page.locator("#new-camera-source")).toHaveValue("0");
+    await page.locator("#camera-dialog [data-close]").click();
+    await page.locator(".nav-item[data-view=media]").click();
+    const requestPromise = page.waitForRequest((request) => {
+      const url = new URL(request.url());
+      return (
+        url.pathname === "/api/v1/media" &&
+        url.searchParams.get("limit") === "24" &&
+        url.searchParams.has("created_after") &&
+        url.searchParams.has("created_before")
+      );
+    });
+    await page.locator("#media-from").fill("2026-06-15");
+    await page.locator("#media-to").fill("2026-06-15");
+    await page.locator("#media-from").dispatchEvent("change");
+    const request = await requestPromise;
+    const params = new URL(request.url()).searchParams;
+    const expected = await page.evaluate(() => {
+      const start = new Date(2026, 5, 15);
+      const end = new Date(2026, 5, 16);
+      return {
+        after: String(Math.floor(start.getTime() / 1000)),
+        before: String(Math.floor(end.getTime() / 1000) - 1),
+      };
+    });
+    expect(params.get("created_after")).toBe(expected.after);
+    expect(params.get("created_before")).toBe(expected.before);
+    expect(params.get("created_after")).not.toBe(
+      String(Date.parse("2026-06-15T00:00:00.000Z") / 1000),
+    );
+  } finally {
+    await context.close();
+  }
+});
+
 test("contrast, schedule editing, password form, and pairing stay in the interface", async ({
   page,
 }) => {
@@ -982,12 +1032,16 @@ test("contrast, schedule editing, password form, and pairing stay in the interfa
     hasText: "Edited rule",
   });
   await expect(card).toContainText("00:15");
+  await card.getByRole("button", { name: "Pausieren" }).click();
+  await expect(card).toContainText("Aus");
   await card.getByRole("button", { name: "Bearbeiten" }).click();
   await page.locator("#schedule-form [name=name]").fill("Edited rule saved");
   await page.locator("#schedule-form .full-button").click();
-  await expect(
-    page.locator("#schedule-list h3", { hasText: "Edited rule saved" }),
-  ).toHaveCount(1);
+  const saved = page.locator("#schedule-list article", {
+    hasText: "Edited rule saved",
+  });
+  await expect(saved).toContainText("Aus");
+  await expect(saved.getByRole("button", { name: "Fortsetzen" })).toBeVisible();
   await page.locator(".nav-item[data-view=settings]").click();
   await expect(page.locator("#password-form")).toBeVisible();
   await expect(page.locator("#pair-homeassistant")).toBeVisible();

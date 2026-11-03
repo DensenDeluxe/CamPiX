@@ -43,6 +43,7 @@
     picked: new Set(),
     regions: [],
     editingSchedule: "",
+    editingEnabled: true,
     passwordUser: "",
     clearPtzPassword: false,
     desktopNotes: localStorage.getItem("campix-notes") === "1",
@@ -247,6 +248,10 @@
     timelapseTooMany: [
       "Mehr als 500 Fotos passen. Grenze die Suche ein, bevor du exportierst.",
       "More than 500 photos match. Narrow the search before exporting.",
+    ],
+    timelapseOneCamera: [
+      "Ein Zeitraffer verwendet Aufnahmen von genau einer Kamera.",
+      "A timelapse uses snapshots from exactly one camera.",
     ],
     needPhotos: [
       "Mindestens zwei Fotos erforderlich.",
@@ -1548,6 +1553,28 @@
     card.addEventListener("click", () => openMedia(item));
     return card;
   }
+  function localDayBounds(value) {
+    // A date input is a local calendar day. Date.parse("YYYY-MM-DD") is UTC midnight.
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value || "");
+    if (!match) return null;
+    const year = Number(match[1]);
+    const month = Number(match[2]);
+    const day = Number(match[3]);
+    const start = new Date(year, month - 1, day);
+    const end = new Date(year, month - 1, day + 1);
+    if (
+      start.getFullYear() !== year ||
+      start.getMonth() !== month - 1 ||
+      start.getDate() !== day ||
+      !Number.isFinite(start.getTime()) ||
+      !Number.isFinite(end.getTime())
+    )
+      return null;
+    return {
+      after: Math.floor(start.getTime() / 1000),
+      before: Math.floor(end.getTime() / 1000) - 1,
+    };
+  }
   function mediaPath({ limit, offset, kind = "", query = "" }) {
     const params = new URLSearchParams({
       limit: String(limit),
@@ -1555,12 +1582,13 @@
     });
     if (kind) params.set("kind", kind);
     if (s.mediaCamera) params.set("camera_id", s.mediaCamera);
-    if (s.mediaFrom)
-      params.set("created_after", String(Date.parse(s.mediaFrom) / 1000));
+    if (s.mediaFrom) {
+      const from = localDayBounds(s.mediaFrom);
+      if (from) params.set("created_after", String(from.after));
+    }
     if (s.mediaTo) {
-      const end = Date.parse(s.mediaTo);
-      if (Number.isFinite(end))
-        params.set("created_before", String(end / 1000 + 86399));
+      const to = localDayBounds(s.mediaTo);
+      if (to) params.set("created_before", String(to.before));
     }
     const text = query.trim();
     if (text) params.set("q", text);
@@ -1736,6 +1764,7 @@
     options($("#schedule-camera"));
     const form = $("#schedule-form");
     s.editingSchedule = job?.id || "";
+    s.editingEnabled = job ? job.enabled !== false : true;
     form.elements.name.value = job?.name || "";
     form.elements.camera_id.value = job?.camera_id || s.selected;
     form.elements.action.value = job?.action || "snapshot";
@@ -2123,14 +2152,16 @@
     b.addEventListener("click", () => addCamera()),
   );
   $("#new-camera-backend").addEventListener("change", (e) => {
-    $("#new-camera-source").value = {
-      picamera2: "0",
-      v4l2: "/dev/video0",
-      dshow: "",
-      network: "rtsp://",
-      legacy: "/dev/shm/mjpeg/cam.jpg",
-      synthetic: "0",
-    }[e.target.value];
+    $("#new-camera-source").value =
+      {
+        picamera2: "0",
+        v4l2: "/dev/video0",
+        dshow: "",
+        avfoundation: "0",
+        network: "rtsp://",
+        legacy: "/dev/shm/mjpeg/cam.jpg",
+        synthetic: "0",
+      }[e.target.value] ?? "";
   });
   $("#camera-form").addEventListener("submit", (e) => {
     e.preventDefault();
@@ -2185,6 +2216,7 @@
     act(async () => {
       await api("/schedules", "POST", {
         ...payload,
+        enabled: s.editingEnabled,
         id: s.editingSchedule || "job-" + crypto.randomUUID().slice(0, 8),
       });
       s.editingSchedule = "";
@@ -2368,11 +2400,11 @@
         mediaPath({ limit: 500, offset: 0, kind: "snapshot", query: s.query }),
       );
       if (library.total > 500) throw new Error(t("timelapseTooMany"));
-      const ids = library.items
-        .filter((i) => i.kind === "snapshot")
-        .sort((a, b) => a.created - b.created)
-        .map((i) => i.id);
-      if (ids.length < 2) throw new Error(t("needPhotos"));
+      const photos = library.items.filter((i) => i.kind === "snapshot");
+      if (photos.length < 2) throw new Error(t("needPhotos"));
+      if (new Set(photos.map((item) => item.camera_id)).size !== 1)
+        throw new Error(t("timelapseOneCamera"));
+      const ids = photos.sort((a, b) => a.created - b.created).map((i) => i.id);
       if (!confirm(t("timelapseHint").replace("{count}", String(ids.length))))
         return;
       await api("/timelapse", "POST", { media_ids: ids, fps: 10 });

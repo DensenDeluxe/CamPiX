@@ -132,14 +132,24 @@ def test_password_change_revokes_the_session_and_rejects_the_old_password(client
     assert restored.status_code == 200
 
 
-def test_viewer_allow_list_hides_cameras_media_and_events(client):
+def test_viewer_allow_list_hides_cameras_media_events_and_schedules(client):
     signin(client)
+    created = client.post(
+        "/api/v1/schedules",
+        json={"id": "hidden-job", "name": "Hidden night", "camera_id": "demo"},
+    )
+    assert created.status_code == 201, created.text
     assert client.patch("/api/v1/cameras/demo", json={"viewer_users": ["admin"]}).status_code == 200
     assert client.post("/api/v1/auth/logout").status_code == 200
     signin(client, "viewer")
     assert client.get("/api/v1/cameras").json() == []
     assert client.get("/api/v1/cameras/demo/preview.jpg").status_code == 404
     assert client.get("/api/v1/media").json()["total"] == 0
+    assert client.get("/api/v1/schedules").json() == []
+    assert all(event.get("camera_id") != "demo" for event in client.get("/api/v1/events").json())
+    assert client.post("/api/v1/auth/logout").status_code == 200
+    signin(client, "operator")
+    assert client.get("/api/v1/schedules").json()[0]["id"] == "hidden-job"
 
 
 def test_library_filters_bulk_actions_and_share_links(client):
