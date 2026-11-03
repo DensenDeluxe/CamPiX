@@ -117,7 +117,7 @@ class EncodedRecorder:
         self.context = None
         self.proc = None
         try:
-            self.media_id, self.path = store.reserve("mp4")
+            self.media_id, self.path = store.reserve("mp4", config.id)
             self.partial = self.path.with_suffix(".mp4.partial")
             self.muxer = TransportStreamMuxer(epoch=state["epoch"])
             command = [
@@ -240,7 +240,12 @@ class EncodedRecorder:
                 self.result = {"id": self.media_id, "duration": duration, "deferred": True}
         except Exception as exc:
             self.error = f"Recording failed ({type(exc).__name__}); media retained for recovery"
-            self.store.bus.publish("recording.error", self.error, self.config.id)
+            self.store.bus.publish(
+                "recording.error",
+                self.error,
+                self.config.id,
+                {"media_id": self.media_id, "trigger": self.trigger},
+            )
         finally:
             self.subscription.close()
             try:
@@ -276,7 +281,7 @@ class Recorder:
         self, config, settings, store, preroll, trigger="manual", duration=None, *, selection=None
     ):
         self.config, self.settings, self.store = config, settings, store
-        self.media_id, self.path = store.reserve("mp4")
+        self.media_id, self.path = store.reserve("mp4", config.id)
         self.partial = self.path.with_suffix(".mp4.partial")
         self.queue = queue.Queue(maxsize=min(600, config.fps * (config.preroll_seconds + 4)))
         self.queue_lock = threading.Lock()
@@ -370,6 +375,7 @@ class Recorder:
             self.proc.stdin.close()
             if self.proc.wait(timeout=20) != 0 or self.frames == 0:
                 raise RuntimeError("Encoder did not finalize a recording")
+            _validate_remux(self.partial, self.frames)
             self.partial.replace(self.path)
             self.result = self.store.register(
                 self.media_id,
@@ -381,7 +387,12 @@ class Recorder:
             )
         except Exception as exc:
             self.error = f"Recording failed ({type(exc).__name__}); partial retained for recovery"
-            self.store.bus.publish("recording.error", self.error, self.config.id)
+            self.store.bus.publish(
+                "recording.error",
+                self.error,
+                self.config.id,
+                {"media_id": self.media_id, "trigger": self.trigger},
+            )
         finally:
             terminate_process(self.proc)
             if self.proc.stdin and not self.proc.stdin.closed:

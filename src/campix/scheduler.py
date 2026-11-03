@@ -43,6 +43,9 @@ class Scheduler:
         self.halt = threading.Event()
         self.thread = threading.Thread(target=self._run, name="scheduler", daemon=True)
         self.last_cleanup = time.monotonic()
+        self.pending = {}
+        self.pending_lock = threading.Lock()
+        self.bus.add_listener(self._finish_recording)
 
     def start(self):
         self.thread.start()
@@ -58,17 +61,24 @@ class Scheduler:
         existing = self.db.one(
             "SELECT config, next_run FROM schedules WHERE id=?", (schedule.id,)
         )
+        previous = {}
+        if existing:
+            try:
+                loaded = json.loads(existing["config"])
+            except json.JSONDecodeError:
+                loaded = {}
+            if isinstance(loaded, dict):
+                previous = loaded
+        if schedule.enabled is None:
+            kept = previous.get("enabled", True) if existing else True
+            if not isinstance(kept, bool):
+                kept = True
+            schedule = schedule.model_copy(update={"enabled": kept})
         now = time.time()
         next_run = now + schedule.interval_seconds
         if existing:
             # Pausing, renaming, or editing the window must not skip a day.
             next_run = float(existing["next_run"])
-            try:
-                previous = json.loads(existing["config"])
-            except json.JSONDecodeError:
-                previous = {}
-            if not isinstance(previous, dict):
-                previous = {}
             if previous.get("interval_seconds") != schedule.interval_seconds:
                 next_run = now + schedule.interval_seconds
             elif schedule.enabled and previous.get("enabled", True) is False and next_run < now:
@@ -100,6 +110,8 @@ class Scheduler:
                     "UPDATE schedules SET next_run=? WHERE id=?",
                     (now + schedule.interval_seconds, schedule.id),
                 )
+                if schedule.enabled is None:
+                    schedule = schedule.model_copy(update={"enabled": True})
                 if schedule.enabled and in_window(schedule, now):
                     jobs.append(schedule)
         for schedule_id in invalid:
@@ -113,16 +125,22 @@ class Scheduler:
                 camera = self.cameras.get(schedule.camera_id)
                 if schedule.action == "snapshot":
                     camera.snapshot(trigger="schedule:" + schedule.id)
+                    self.bus.publish(
+                        "schedule.completed",
+                        "Scheduled action executed",
+                        schedule.camera_id,
+                        {"schedule_id": schedule.id},
+                    )
                 else:
-                    camera.start_recording(
+                    started = camera.start_recording(
                         duration=schedule.duration_seconds, trigger="schedule:" + schedule.id
                     )
-                self.bus.publish(
-                    "schedule.completed",
-                    "Scheduled action executed",
-                    schedule.camera_id,
-                    {"schedule_id": schedule.id},
-                )
+                    media_id = started.get("media_id") if isinstance(started, dict) else None
+                    if isinstance(media_id, str):
+                        with self.pending_lock:
+                            self.pending[media_id] = (schedule.id, schedule.camera_id)
+                            if len(self.pending) > 64:
+                                self.pending.pop(next(iter(self.pending)))
             except CaptureError as exc:
                 if schedule.action == "record" and "already in progress" in str(exc):
                     # The claim already moved next_run by one interval. A longer
@@ -151,6 +169,32 @@ class Scheduler:
                     schedule.camera_id,
                     {"schedule_id": schedule.id},
                 )
+
+    def _finish_recording(self, event):
+        """A scheduled take is complete only after the library indexes it."""
+        data = event.get("data") or {}
+        media_id = data.get("media_id")
+        if event["kind"] not in {"media.saved", "recording.error"} or not isinstance(media_id, str):
+            return
+        with self.pending_lock:
+            job = self.pending.pop(media_id, None)
+        if not job:
+            return
+        schedule_id, camera_id = job
+        if event["kind"] == "media.saved":
+            self.bus.publish(
+                "schedule.completed",
+                "Scheduled recording saved",
+                camera_id,
+                {"schedule_id": schedule_id, "media_id": media_id},
+            )
+            return
+        self.bus.publish(
+            "schedule.error",
+            "Scheduled recording was not saved",
+            camera_id,
+            {"schedule_id": schedule_id, "media_id": media_id},
+        )
 
     def _run(self):
         while not self.halt.wait(1):

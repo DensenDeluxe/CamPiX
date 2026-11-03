@@ -152,7 +152,7 @@ def test_viewer_allow_list_hides_cameras_media_events_and_schedules(client):
     assert client.get("/api/v1/schedules").json()[0]["id"] == "hidden-job"
 
 
-def test_library_filters_bulk_actions_and_share_links(client):
+def test_library_filters_bulk_actions_and_share_links(client, application):
     signin(client)
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
@@ -168,6 +168,16 @@ def test_library_filters_bulk_actions_and_share_links(client):
     assert listed.status_code == 200
     assert listed.json()["total"] == 1
     assert client.get("/api/v1/media", params={"created_before": int(early)}).json()["total"] == 0
+    fraction_id = "cd" * 16
+    fraction_at = 1_700_000_000.75
+    application.state.db.execute(
+        "INSERT INTO media(id,camera_id,kind,filename,created,size,trigger) VALUES (?,?,?,?,?,?,?)",
+        (fraction_id, "demo", "snapshot", "fraction.jpg", fraction_at, 10, "manual"),
+    )
+    included = client.get("/api/v1/media", params={"created_before": 1_700_000_001, "q": "fraction"})
+    assert [item["id"] for item in included.json()["items"]] == [fraction_id]
+    excluded = client.get("/api/v1/media", params={"created_before": 1_700_000_000, "q": "fraction"})
+    assert excluded.json()["total"] == 0
     locked = client.post("/api/v1/media/actions", json={"ids": [item["id"]], "action": "lock"})
     assert locked.json()["results"] == [{"id": item["id"], "ok": True}]
     deleted = client.post("/api/v1/media/actions", json={"ids": [item["id"]], "action": "delete"})

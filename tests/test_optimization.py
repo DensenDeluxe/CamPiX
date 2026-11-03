@@ -84,6 +84,39 @@ def test_shed_levels_follow_temperature_and_load():
     assert shed_level_for(None, 4) == 2
 
 
+def test_unknown_host_memory_refuses_admission():
+    assert (
+        admission_reason(width=640, height=480, fps=10, memory_total=0, camera_count=1)
+        == "Host memory is unavailable, so this profile cannot be admitted"
+    )
+
+
+def test_camera_save_fails_closed_when_memory_cannot_be_read(client, monkeypatch):
+    from .conftest import signin
+
+    signin(client)
+
+    def unavailable():
+        raise OSError("memory unavailable")
+
+    monkeypatch.setattr("psutil.virtual_memory", unavailable)
+    response = client.post(
+        "/api/v1/cameras",
+        json={
+            "id": "memory",
+            "name": "Memory",
+            "backend": "synthetic",
+            "source": "0",
+            "width": 640,
+            "height": 360,
+            "fps": 5,
+        },
+    )
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"] == "Host memory is unavailable, so this profile cannot be admitted"
+    assert [item["id"] for item in client.get("/api/v1/cameras").json()] == ["demo"]
+
+
 def test_admission_reason_protects_small_hosts_and_pi_5_software_encoding():
     assert (
         admission_reason(

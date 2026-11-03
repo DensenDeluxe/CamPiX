@@ -558,6 +558,8 @@ class Camera:
                     ):
                         try:
                             recorder.stop()
+                        except RuntimeError as exc:
+                            self._surface_recording_failure(exc, getattr(recorder, "media_id", None))
                         finally:
                             with self.condition:
                                 self.recorder = None
@@ -729,6 +731,16 @@ class Camera:
             self.bus.publish("recording.stopped", "Recording finalized", self.config.id)
             return result
 
+    def _surface_recording_failure(self, exc, media_id=None):
+        """Keep shutdown moving, and do not hide a take that never entered the library."""
+        self.error = str(exc)
+        LOG.error("Camera %s recording did not finalize: %s", self.config.id, type(exc).__name__)
+        message = str(exc)
+        if message.startswith("Recording failed"):
+            return
+        data = {"media_id": media_id} if media_id else None
+        self.bus.publish("recording.error", message, self.config.id, data)
+
     def apply_controls(self, values):
         with self.operation_lock:
             if self.status != "online" or not self.backend:
@@ -856,10 +868,11 @@ class Camera:
         with self.operation_lock:
             self.stopping = True
             if self.recorder:
+                media_id = getattr(self.recorder, "media_id", None)
                 try:
                     self.stop_recording()
-                except RuntimeError:
-                    pass
+                except RuntimeError as exc:
+                    self._surface_recording_failure(exc, media_id)
             self.halt.set()
         self._fail_snapshots()
         with self.condition:

@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import os
+import re
 import shutil
 import threading
 import time
 import uuid
 
 from .shares import revoke_media
+
+_CAMERA_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,47}")
 
 
 class StorageError(RuntimeError):
@@ -25,11 +29,39 @@ class MediaStore:
             raise StorageError("Invalid media path")
         return path
 
-    def reserve(self, extension):
+    def reserve(self, extension, camera_id=None):
         self.check_space()
         media_id = uuid.uuid4().hex
         filename = f"{time.strftime('%Y%m%d_%H%M%S', time.gmtime())}_{media_id}.{extension}"
-        return media_id, self.path(filename)
+        path = self.path(filename)
+        if camera_id is not None:
+            self.remember_camera(path, camera_id)
+        return media_id, path
+
+    def _camera_note(self, path):
+        return path.with_name(path.name + ".camera")
+
+    def remember_camera(self, path, camera_id):
+        if not isinstance(camera_id, str) or _CAMERA_ID.fullmatch(camera_id) is None:
+            raise StorageError("Camera id is not allowed")
+        note = self._camera_note(path)
+        temporary = note.with_name(note.name + ".partial")
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, camera_id.encode())
+        finally:
+            os.close(fd)
+        temporary.replace(note)
+
+    def source_camera(self, path):
+        note = self._camera_note(path)
+        try:
+            text = note.read_text(encoding="utf-8").strip()
+        except OSError:
+            return None
+        if _CAMERA_ID.fullmatch(text) is None or text == "recovered":
+            return None
+        return text
 
     def check_space(self):
         if shutil.disk_usage(self.root).free < self.settings.min_free_mb * 1024 * 1024:
@@ -57,14 +89,18 @@ class MediaStore:
                     trigger,
                 ),
             )
+            self._camera_note(path).unlink(missing_ok=True)
         result = self.get(media_id)
         self.bus.publish(
-            "media.saved", f"{kind.capitalize()} saved", camera_id, {"media_id": media_id}
+            "media.saved",
+            f"{kind.capitalize()} saved",
+            camera_id,
+            {"media_id": media_id, "trigger": trigger},
         )
         return result
 
     def snapshot(self, camera_id, jpeg, trigger="manual"):
-        media_id, path = self.reserve("jpg")
+        media_id, path = self.reserve("jpg", camera_id)
         partial = path.with_suffix(".partial")
         with partial.open("xb") as stream:
             stream.write(jpeg)
@@ -98,7 +134,8 @@ class MediaStore:
             clauses.append("created>=?")
             args.append(created_after)
         if created_before is not None:
-            clauses.append("created<=?")
+            # Exclusive end, so the last fraction of a second still belongs to that range.
+            clauses.append("created<?")
             args.append(created_before)
         if exclude_cameras:
             clauses.append("camera_id NOT IN (" + ",".join("?" * len(exclude_cameras)) + ")")
@@ -177,7 +214,11 @@ class MediaStore:
         for row in self.db.all("SELECT id,filename FROM media"):
             if not self.path(row["filename"]).is_file():
                 self.db.execute("DELETE FROM media WHERE id=?", (row["id"],))
-        orphans = [p.name for p in self.root.iterdir() if p.is_file() and p.name not in known]
+        orphans = [
+            p.name
+            for p in self.root.iterdir()
+            if p.is_file() and p.name not in known and not p.name.endswith(".camera")
+        ]
         if orphans:
             self.bus.publish(
                 "storage.recovery",

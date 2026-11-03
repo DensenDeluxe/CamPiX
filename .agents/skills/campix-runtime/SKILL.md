@@ -29,7 +29,7 @@ Build FFmpeg and MediaMTX commands as argument lists in code. Camera URLs, devic
 
 ## Scheduler
 
-Schedules are persistent and claim a run before executing it. Pausing, renaming, or editing weekdays keeps the next run when the interval is unchanged. Monday is `0`. A new recording rule must be shorter than its interval. An older overlapping recording is skipped, without an error event, until that take should have finished. There is no solar, cron, or macro engine.
+Schedules are persistent and claim a run before executing it. Pausing, renaming, or editing weekdays keeps the next run when the interval is unchanged. An update that omits `enabled` keeps the stored paused or active state. Monday is `0`. A new recording rule must be shorter than its interval. An older overlapping recording is skipped, without an error event, until that take should have finished. A scheduled recording publishes `schedule.completed` only after the file is indexed, and `schedule.error` when the take fails. There is no solar, cron, or macro engine.
 
 ## Docs and tests
 

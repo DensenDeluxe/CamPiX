@@ -117,6 +117,8 @@ class CameraConfig(StrictModel):
 
     @model_validator(mode="after")
     def source_valid(self):
+        if self.id == "recovered":
+            raise ValueError("Camera id is reserved")
         if self.backend == "picamera2" and not self.source.isdecimal():
             raise ValueError("Picamera2 source must be a camera index")
         if self.backend == "v4l2" and not __import__("re").fullmatch(r"/dev/video\d+", self.source):
@@ -239,7 +241,7 @@ class Schedule(StrictModel):
     action: Literal["snapshot", "record"] = "snapshot"
     interval_seconds: int = Field(3600, ge=5, le=604800)
     duration_seconds: int = Field(30, ge=1, le=3600)
-    enabled: bool = True
+    enabled: bool | None = None
     days: list[int] = Field(default_factory=lambda: list(range(7)), max_length=7)
     start_hour: int = Field(0, ge=0, le=23)
     start_minute: int = Field(0, ge=0, le=59)

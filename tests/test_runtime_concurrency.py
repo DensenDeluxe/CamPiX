@@ -113,6 +113,22 @@ def test_frame_packet_never_returns_stale_or_stopped_source(tmp_path, failure):
         camera.frame_packet(timeout=0)
 
 
+def test_shutdown_reports_a_recording_that_did_not_finalize(tmp_path):
+    camera, events = camera_stub(tmp_path)
+
+    def failed_stop():
+        raise RuntimeError("Recording remuxer did not stop in time")
+
+    camera.recorder = SimpleNamespace(stop=failed_stop, media_id="ab" * 16, trigger="manual")
+    camera.stop()
+    assert camera.halt.is_set()
+    assert camera.error == "Recording remuxer did not stop in time"
+    assert any(
+        event[0] == "recording.error" and event[3]["media_id"] == "ab" * 16 for event in events
+    )
+    assert not any(event[0] == "recording.stopped" for event in events)
+
+
 def test_failed_recording_stop_never_publishes_finalized_event(tmp_path):
     camera, events = camera_stub(tmp_path)
 

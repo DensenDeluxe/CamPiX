@@ -19,7 +19,7 @@ Home Assistant pairing creates at most eight viewer tokens. Only the SHA-256 dig
 
 Passwords use Argon2id. Session ids are stored as hashes. Cookies are HttpOnly and SameSite=Strict. Login rechecks the account inside a write transaction before inserting a session. A password, role, or disabled-state change that lands during login rejects that login. Logout, disable, expiry, and role or password changes revoke access.
 
-State-changing routes, including logout, camera commands, and WHEP session management, require a CSRF token plus Origin and Fetch-Site checks. WebSockets require a valid session and a matching origin. Login is limited by IP and username. Writes are limited by user. The API body limit is 64 KiB (`src/campix/app.py`).
+State-changing routes, including logout, camera commands, and WHEP session management, require a CSRF token plus Origin and Fetch-Site checks. A command-line write may omit Origin because the CSRF token is still required. WebSockets require a valid session and a present matching Origin. A missing Origin is rejected. Login is limited by IP and username. Writes are limited by user. The API body limit is 64 KiB (`src/campix/app.py`).
 
 HTTP 422 responses expose error types, vetted field locations, and fixed English messages. They withhold submitted values, validator context, arbitrary mapping keys, and arbitrary exception text. Configuration errors must not echo camera URLs, tokens, or passwords. Keep the existing tests in `tests/test_validation.py` passing when you change a model.
 
