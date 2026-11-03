@@ -225,6 +225,13 @@
     enabled: ["Aktiv", "Enabled"],
     disabled: ["Aus", "Off"],
     delete: ["Löschen", "Delete"],
+    confirmDeleteMany: [
+      "{count} ausgewählte Elemente dauerhaft löschen?",
+      "Permanently delete {count} selected items?",
+    ],
+    selectAll: ["Alle auswählen", "Select all"],
+    selectNone: ["Auswahl aufheben", "Clear selection"],
+    selectedCount: ["{count} ausgewählt", "{count} selected"],
     download: ["Herunterladen", "Download"],
     lock: ["Sperren", "Lock"],
     unlock: ["Entsperren", "Unlock"],
@@ -1546,7 +1553,7 @@
       box.addEventListener("change", () => {
         if (box.checked) s.picked.add(item.id);
         else s.picked.delete(item.id);
-        $("#media-bulk").hidden = s.picked.size === 0;
+        syncSelection();
       });
       card.append(box);
     }
@@ -1594,6 +1601,49 @@
     if (text) params.set("q", text);
     return "/media?" + params;
   }
+  function syncSelection() {
+    const selectAll = $("#media-select-all");
+    if (!selectAll) return;
+    const allSelected = s.total > 0 && s.picked.size === s.total;
+    selectAll.hidden = s.view !== "media" || !operate() || s.total === 0;
+    selectAll.textContent = allSelected ? t("selectNone") : t("selectAll");
+    const count = $("#media-selected");
+    if (count)
+      count.textContent = t("selectedCount").replace(
+        "{count}",
+        String(s.picked.size),
+      );
+    $("#media-bulk").hidden = s.picked.size === 0;
+  }
+  async function selectMatchingMedia() {
+    if (s.total > 0 && s.picked.size === s.total) {
+      s.picked.clear();
+      syncSelection();
+      renderMedia();
+      return;
+    }
+    const ids = [];
+    let offset = 0;
+    let total = 0;
+    do {
+      const page = await api(
+        mediaPath({
+          limit: 500,
+          offset,
+          kind: s.kind,
+          query: s.query,
+        }),
+      );
+      total = page.total;
+      ids.push(...page.items.map((item) => item.id));
+      offset += page.items.length;
+      if (!page.items.length) break;
+    } while (offset < total);
+    s.total = total;
+    s.picked = new Set(ids);
+    syncSelection();
+    renderMedia();
+  }
   function renderMedia() {
     $("#media-grid").replaceChildren(...s.media.map((i) => mediaCard(i)));
     if (!s.media.length)
@@ -1606,6 +1656,7 @@
     if (!s.recent.length)
       $("#recent-media").append(make("p", "empty-message", t("empty")));
     $("#media-bulk").hidden = s.picked.size === 0;
+    syncSelection();
     const cameraFilter = $("#media-camera");
     const current = cameraFilter.value;
     cameraFilter.replaceChildren(new Option(t("allCameras"), ""));
@@ -2020,6 +2071,7 @@
     s.lang = s.lang === "de" ? "en" : "de";
     localStorage.setItem("campix-language", s.lang);
     translate();
+    syncSelection();
     updateAudioButton();
     $("#motion-mask").setAttribute("aria-label", t("motionMask"));
     $("#live-layout-toggle")?.setAttribute("aria-label", t("singleView"));
@@ -2365,6 +2417,7 @@
       act(async () => {
         s.kind = b.dataset.kind;
         s.offset = 0;
+        s.picked.clear();
         $$("#media-filters button").forEach((e) =>
           e.classList.toggle("active", e === b),
         );
@@ -2379,6 +2432,7 @@
       if (next === s.query) return;
       s.query = next;
       s.offset = 0;
+      s.picked.clear();
       act(refresh);
     }, 250);
   });
@@ -2569,6 +2623,9 @@
     reader.readAsText(file);
     event.target.value = "";
   });
+  $("#media-select-all").addEventListener("click", (event) =>
+    act(() => selectMatchingMedia(), event.currentTarget),
+  );
   for (const [id, action] of [
     ["bulk-lock", "lock"],
     ["bulk-unlock", "unlock"],
@@ -2578,8 +2635,19 @@
       act(
         async () => {
           if (!s.picked.size) return;
-          if (action === "delete" && !confirm(t("confirmDelete"))) return;
-          await api("/media/actions", "POST", { ids: [...s.picked], action });
+          const ids = [...s.picked];
+          const prompt =
+            ids.length > 1 ? t("confirmDeleteMany") : t("confirmDelete");
+          if (
+            action === "delete" &&
+            !confirm(prompt.replace("{count}", String(ids.length)))
+          )
+            return;
+          for (let index = 0; index < ids.length; index += 100)
+            await api("/media/actions", "POST", {
+              ids: ids.slice(index, index + 100),
+              action,
+            });
           s.picked.clear();
           await refresh();
         },
@@ -2596,6 +2664,7 @@
     act(async () => {
       s.mediaCamera = $("#media-camera").value;
       s.offset = 0;
+      s.picked.clear();
       await refresh();
     }),
   );
@@ -2605,6 +2674,7 @@
         s.mediaFrom = $("#media-from").value;
         s.mediaTo = $("#media-to").value;
         s.offset = 0;
+        s.picked.clear();
         await refresh();
       }),
     );

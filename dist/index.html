@@ -563,8 +563,17 @@
                 ><span data-i18n="toDate">Bis</span
                 ><input id="media-to" type="date"
               /></label>
+              <button
+                type="button"
+                class="button ghost"
+                id="media-select-all"
+                hidden
+              >
+                Alle auswählen
+              </button>
             </div>
             <div class="media-bulk" id="media-bulk" hidden>
+              <span id="media-selected"></span>
               <button
                 class="button soft"
                 id="bulk-lock"
