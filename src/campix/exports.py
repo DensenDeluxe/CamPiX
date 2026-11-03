@@ -38,15 +38,19 @@ class ExportService:
             items = [self.store.get(media_id) for media_id in payload.media_ids]
             if any(item["kind"] != "snapshot" for item in items):
                 raise StorageError("Timelapse accepts only snapshots")
+            cameras = {item["camera_id"] for item in items}
+            if len(cameras) != 1:
+                raise StorageError("Timelapse snapshots must belong to one camera")
+            camera_id = items[0]["camera_id"]
             job_id = uuid.uuid4().hex
             self.db.execute(
                 "INSERT INTO export_jobs(id,status,created) VALUES (?,'queued',?)",
                 (job_id, time.time()),
             )
             self.queue.put_nowait(
-                (job_id, sorted(items, key=lambda item: item["created"]), payload.fps)
+                (job_id, sorted(items, key=lambda item: item["created"]), payload.fps, camera_id)
             )
-        self.bus.publish("export.queued", "Timelapse export queued", data={"job_id": job_id})
+        self.bus.publish("export.queued", "Timelapse export queued", camera_id, {"job_id": job_id})
         return self.get(job_id)
 
     def get(self, job_id):
@@ -130,7 +134,7 @@ class ExportService:
     def _run(self):
         while not self.halt.is_set():
             try:
-                job_id, items, fps = self.queue.get(timeout=0.2)
+                job_id, items, fps, camera_id = self.queue.get(timeout=0.2)
             except queue.Empty:
                 continue
             try:
@@ -143,14 +147,15 @@ class ExportService:
                 self.bus.publish(
                     "export.completed",
                     "Timelapse saved",
-                    data={"job_id": job_id, "media_id": result["id"]},
+                    camera_id,
+                    {"job_id": job_id, "media_id": result["id"]},
                 )
             except Exception as exc:
                 message = f"Export failed ({type(exc).__name__}); inputs were not modified"
                 self.db.execute(
                     "UPDATE export_jobs SET status='failed',error=? WHERE id=?", (message, job_id)
                 )
-                self.bus.publish("export.failed", message, data={"job_id": job_id})
+                self.bus.publish("export.failed", message, camera_id, {"job_id": job_id})
         self.db.execute(
             "UPDATE export_jobs SET status='failed',error='Export cancelled on shutdown' WHERE status='queued'"
         )

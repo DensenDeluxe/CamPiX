@@ -11,7 +11,7 @@ Authorization is enforced on the server. Browser controls, hidden buttons, and a
 
 `viewer` can view and download. `operator` can also apply controls, record, lock or delete unlocked media, export, and create share links. `admin` can also manage cameras, schedules, users, storage, notifications, integrations, backup, and ONVIF. The API refuses to remove or demote the last active administrator.
 
-An empty `viewer_users` list leaves the shared library. A non-empty list hides that camera, its media, and its events from other viewers. Operators and administrators still see every camera.
+An empty `viewer_users` list leaves the shared library. A non-empty list hides that camera, its media, its schedules, and its events from other viewers. Operators and administrators still see every camera.
 
 Home Assistant pairing creates at most eight viewer tokens. Only the SHA-256 digest is stored. The raw token is returned once. A bearer token skips cookie CSRF because a browser does not attach it automatically. A browser session still requires CSRF when a session cookie is present, even if a bearer header is also present. Revoking a token stops later requests and an open MJPEG stream.
 
@@ -29,7 +29,7 @@ HTTP 422 responses expose error types, vetted field locations, and fixed English
 
 Network camera sources are `rtsp`, `rtsps`, `http`, or `https` with a hostname. V4L2 sources match `/dev/videoN`. DirectShow names cannot contain quotes, colons, or control characters. Legacy sources are absolute JPEG paths. The `gstreamer` backend name is rejected.
 
-Notification kinds that may leave the service are `motion.detected`, `camera.stalled`, `storage.reserve`, and `export.failed`. The webhook is HTTPS, or HTTP to loopback, with redirects disabled and link-local or metadata addresses rejected. Mail is SMTP to `127.0.0.1` only. The signing secret and webhook URL stay out of configuration export.
+Notification kinds that may leave the service are `motion.detected`, `camera.stalled`, `storage.reserve`, and `export.failed`. The webhook is HTTPS, or HTTP to loopback, with redirects disabled. Loopback names may resolve to IPv4 or IPv6 loopback. Any other host that resolves to loopback is rejected, along with link-local or metadata addresses. Mail is SMTP to `127.0.0.1` only. The signing secret and webhook URL stay out of configuration export.
 
 Managed MediaMTX stays on loopback. The HLS proxy limit is `HLS_PROXY_MAX_BYTES` (8 MiB) and the WHEP limit is `WHEP_PROXY_MAX_BYTES` (64 KiB), with a bounded upstream deadline. Proxy targets stay on the fixed media paths. Each camera allows at most four concurrent JPEG or MJPEG readers (`StreamSlots`); further readers get HTTP 429. WebRTC viewers do not take those slots.
 

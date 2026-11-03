@@ -5,6 +5,8 @@ import threading
 import time
 import uuid
 
+from .shares import revoke_media
+
 
 class StorageError(RuntimeError):
     pass
@@ -126,12 +128,15 @@ class MediaStore:
             if path.exists():
                 path.replace(trash)
             try:
-                self.db.execute("DELETE FROM media WHERE id=?", (media_id,))
+                with self.db.transaction() as conn:
+                    conn.execute("DELETE FROM media WHERE id=?", (media_id,))
+                    revoke_media(self.db, media_id, conn)
             except BaseException:
                 if trash.exists():
                     trash.replace(path)
                 raise
             trash.unlink(missing_ok=True)
+            return item
 
     def apply_many(self, media_ids, action):
         if action not in {"lock", "unlock", "delete"}:
@@ -140,10 +145,13 @@ class MediaStore:
         for media_id in media_ids:
             try:
                 if action == "delete":
-                    self.delete(media_id)
+                    deleted = self.delete(media_id)
+                    results.append(
+                        {"id": media_id, "ok": True, "camera_id": deleted["camera_id"]}
+                    )
                 else:
                     self.set_locked(media_id, action == "lock")
-                results.append({"id": media_id, "ok": True})
+                    results.append({"id": media_id, "ok": True})
             except KeyError:
                 results.append({"id": media_id, "ok": False, "error": "Resource not found"})
             except StorageError as exc:

@@ -502,6 +502,7 @@ def create_app(settings: Settings | None = None):
             "GStreamer vendor pipelines require an installed adapter; arbitrary pipelines are disabled",
             "Legacy source must be an absolute preview JPEG path",
             "Unsupported or non-finite control",
+            "Control value is outside the allowed range",
             "Each snapshot may be selected once",
             "days must contain distinct weekday numbers 0–6",
             "Unknown IANA timezone",
@@ -917,7 +918,12 @@ def create_app(settings: Settings | None = None):
             for item in result["results"]:
                 if item["ok"]:
                     revoke_media(db, item["id"])
-                    bus.publish("media.deleted", "Media deleted", data={"media_id": item["id"]})
+                    bus.publish(
+                        "media.deleted",
+                        "Media deleted",
+                        item.get("camera_id"),
+                        {"media_id": item["id"]},
+                    )
         return result
 
     @app.post("/api/v1/media/recovery", dependencies=[Depends(admin)], status_code=202)
@@ -934,7 +940,12 @@ def create_app(settings: Settings | None = None):
         if item["camera_id"] in hidden_cameras(user):
             raise KeyError(media_id)
         link = issue_share(db, media_id, payload.hours, user["username"])
-        bus.publish("media.shared", "Media link created", data={"share_id": link["id"]})
+        bus.publish(
+            "media.shared",
+            "Media link created",
+            item["camera_id"],
+            {"share_id": link["id"]},
+        )
         return link
 
     @app.get("/api/v1/shares", dependencies=[Depends(operator)])
@@ -967,9 +978,9 @@ def create_app(settings: Settings | None = None):
 
     @app.delete("/api/v1/media/{media_id}", dependencies=[Depends(operator)])
     def media_delete(media_id: str):
-        store.delete(media_id)
+        item = store.delete(media_id)
         revoke_media(db, media_id)
-        bus.publish("media.deleted", "Media deleted", data={"media_id": media_id})
+        bus.publish("media.deleted", "Media deleted", item["camera_id"], {"media_id": media_id})
         return {"ok": True}
 
     @app.post("/api/v1/timelapse", dependencies=[Depends(operator)], status_code=202)
@@ -978,13 +989,26 @@ def create_app(settings: Settings | None = None):
             raise CaptureError("Timelapse requires FFmpeg with libx264")
         return exports.submit(payload)
 
-    @app.get("/api/v1/jobs/{job_id}", dependencies=[Depends(viewer)])
-    def export_job(job_id: str):
-        return exports.get(job_id)
+    @app.get("/api/v1/jobs/{job_id}")
+    def export_job(job_id: str, user=Depends(viewer)):
+        row = exports.get(job_id)
+        media_id = row.get("media_id")
+        if media_id:
+            try:
+                item = store.get(media_id)
+            except KeyError:
+                item = None
+            if item and item["camera_id"] in hidden_cameras(user):
+                raise KeyError(job_id)
+        return row
 
-    @app.get("/api/v1/schedules", dependencies=[Depends(viewer)])
-    def list_schedules():
-        return scheduler.list()
+    @app.get("/api/v1/schedules")
+    def list_schedules(user=Depends(viewer)):
+        hidden = set(hidden_cameras(user))
+        rows = scheduler.list()
+        if not hidden:
+            return rows
+        return [row for row in rows if row.get("camera_id") not in hidden]
 
     @app.post("/api/v1/schedules", dependencies=[Depends(admin)], status_code=201)
     def save_schedule(payload: Schedule):

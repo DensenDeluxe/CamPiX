@@ -46,8 +46,12 @@ def revoke(db, link_id: str) -> bool:
     return True
 
 
-def revoke_media(db, media_id: str) -> None:
-    db.execute("UPDATE share_links SET revoked=1 WHERE media_id=?", (media_id,))
+def revoke_media(db, media_id: str, conn=None) -> None:
+    statement = "UPDATE share_links SET revoked=1 WHERE media_id=?"
+    if conn is None:
+        db.execute(statement, (media_id,))
+        return
+    conn.execute(statement, (media_id,))
 
 
 def public(db) -> list[dict]:

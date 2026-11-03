@@ -16,6 +16,7 @@ from campix.db import Database
 from campix.process_lock import ProcessLock
 from campix.processes import owned_process
 from campix.recording import Recorder
+from campix.recovery import _media_id
 
 from .conftest import signin
 from .test_service import wait_online, wait_packet_ready
@@ -89,6 +90,36 @@ def test_timelapse_job_completes_and_rejects_invalid_selection(client, applicati
     )
     assert json.loads(result.stdout)["streams"][0]["codec_name"] == "h264"
     assert client.get("/api/v1/media").json()["total"] == 4
+    exported = application.state.db.all(
+        "SELECT kind, camera_id FROM events WHERE kind LIKE 'export.%' ORDER BY id"
+    )
+    assert exported
+    assert {row["camera_id"] for row in exported} == {"demo"}
+    media_id = job["media_id"]
+    assert client.patch("/api/v1/cameras/demo", json={"viewer_users": ["admin"]}).status_code == 200
+    assert client.post("/api/v1/auth/logout").status_code == 200
+    signin(client, "viewer")
+    visible = {event["kind"] for event in client.get("/api/v1/events").json()}
+    assert "export.queued" not in visible and "export.completed" not in visible
+    assert client.get(f"/api/v1/jobs/{job_id}").status_code == 404
+    assert client.get(f"/api/v1/media/{media_id}/file").status_code == 404
+
+
+def test_timelapse_rejects_snapshots_from_more_than_one_camera(client, application):
+    signin(client)
+    if "libx264" not in application.state.cameras.encoders["encoders"]:
+        pytest.skip("libx264 required")
+    now = time.time()
+    ids = ("a" * 32, "b" * 32)
+    for media_id, camera_id in zip(ids, ("demo", "secret"), strict=True):
+        application.state.db.execute(
+            "INSERT INTO media(id,camera_id,kind,filename,created,size,trigger) VALUES (?,?,?,?,?,?,?)",
+            (media_id, camera_id, "snapshot", f"{media_id}.jpg", now, 10, "manual"),
+        )
+    response = client.post("/api/v1/timelapse", json={"media_ids": list(ids)})
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"] == "Timelapse snapshots must belong to one camera"
+    assert application.state.db.one("SELECT id FROM export_jobs") is None
 
 
 def test_media_search_covers_every_page_and_keeps_wildcards_literal(client, application):
@@ -146,6 +177,22 @@ def test_storage_reserve_and_retention_keep_locked_items(client, application, mo
     assert client.post("/api/v1/cameras/demo/recording", json={}).status_code == 409
 
 
+def test_retention_revokes_share_links(client, application):
+    signin(client)
+    wait_online(client)
+    item = client.post("/api/v1/cameras/demo/snapshot").json()
+    shared = client.post(f"/api/v1/media/{item['id']}/share", json={"hours": 1})
+    assert shared.status_code == 200, shared.text
+    assert client.get(shared.json()["path"]).status_code == 200
+    application.state.db.execute("UPDATE media SET created=0 WHERE id=?", (item["id"],))
+    application.state.store.retention()
+    assert client.get(shared.json()["path"]).status_code == 404
+    row = application.state.db.one(
+        "SELECT revoked FROM share_links WHERE id=?", (shared.json()["id"],)
+    )
+    assert row["revoked"]
+
+
 def test_interrupted_files_retained_and_delete_journal_recovers(client, application):
     signin(client)
     wait_online(client)
@@ -157,6 +204,80 @@ def test_interrupted_files_retained_and_delete_journal_recovers(client, applicat
     application.state.store.reconcile()
     assert path.exists() and partial.exists()
     assert client.get("/api/v1/media").json()["total"] == 1
+
+
+def _wait_recovery(client):
+    deadline = time.monotonic() + 20
+    status = {"state": "running"}
+    while time.monotonic() < deadline:
+        status = client.get("/api/v1/media/recovery").json()
+        if status["state"] == "idle":
+            return status
+        time.sleep(0.05)
+    raise AssertionError(status)
+
+
+def test_recovery_indexes_finalized_files_missing_from_the_library(client, application):
+    signin(client)
+    root = application.state.store.root
+    jpeg_id = "ab" * 16
+    assert _media_id(f"20261103_010203_{jpeg_id}.mp4.partial") == jpeg_id
+    assert _media_id(f"20261103_010203_{jpeg_id}.jpg") == jpeg_id
+    assert _media_id("interrupted.mp4.partial") is None
+    jpeg_name = f"20261103_010203_{jpeg_id}.jpg"
+    (root / jpeg_name).write_bytes(b"\xff\xd8\xff\xd9")
+    bad_id = "cd" * 16
+    bad_name = f"20261103_010204_{bad_id}.mp4"
+    (root / bad_name).write_bytes(b"not a movie")
+    loose = root / "notes.mp4"
+    loose.write_bytes(b"notes")
+    link_name = f"20261103_010205_{'ef' * 16}.jpg"
+    (root / link_name).symlink_to(root / jpeg_name)
+    video_id = None
+    video_name = ""
+    if shutil.which("ffmpeg") and shutil.which("ffprobe"):
+        video_id = "12" * 16
+        video_name = f"20261103_010206_{video_id}.mp4"
+        encoded = subprocess.run(
+            [
+                "ffmpeg",
+                "-nostdin",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=16x16:d=0.2",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                str(root / video_name),
+            ],
+            capture_output=True,
+            timeout=20,
+        )
+        assert encoded.returncode == 0, encoded.stderr
+    started = client.post("/api/v1/media/recovery")
+    assert started.status_code == 202, started.text
+    status = _wait_recovery(client)
+    library = {item["id"]: item for item in client.get("/api/v1/media").json()["items"]}
+    assert library[jpeg_id]["trigger"] == "recovery"
+    assert library[jpeg_id]["kind"] == "snapshot"
+    assert library[jpeg_id]["camera_id"] == "recovered"
+    assert bad_id not in library
+    assert (root / bad_name).is_file()
+    assert loose.is_file()
+    names = {item["filename"] for item in library.values()}
+    assert link_name not in names
+    results = {item["file"]: item for item in status["results"]}
+    assert results[jpeg_name]["ok"] is True
+    assert results[bad_name]["ok"] is False
+    if video_id:
+        assert library[video_id]["kind"] == "video"
+        assert library[video_id]["duration"] > 0
+        assert results[video_name]["ok"] is True
 
 
 def test_os_lock_excludes_second_process_and_recovers(tmp_path):

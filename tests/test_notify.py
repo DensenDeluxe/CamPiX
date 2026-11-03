@@ -17,6 +17,7 @@ from campix.notify import (
     notification_body,
     signature_valid,
     validate_webhook_url,
+    webhook_targets,
 )
 from campix.provision import _admin_state
 
@@ -161,6 +162,32 @@ def test_webhook_redirects_and_forbidden_targets_are_not_followed(client, applic
         assert "secret-pass" not in response.text
         assert "169.254.169.254" not in response.text
     assert client.get("/api/v1/notifications", headers={"X-CSRF-Token": ""}).status_code == 200
+
+
+def test_loopback_webhook_names_accept_ipv6_and_public_names_cannot_resolve_there(monkeypatch):
+    def resolve(host, port, timeout):
+        if host == "localhost":
+            return [
+                (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("::1", port, 0, 0)),
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port)),
+            ]
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port))]
+
+    monkeypatch.setattr("campix.notify._resolve", resolve)
+    assert validate_webhook_url("http://[::1]/hook") == "http://[::1]/hook"
+    assert webhook_targets("http://[::1]/hook") == ["::1"]
+    assert webhook_targets("http://localhost/hook") == ["::1", "127.0.0.1"]
+    with pytest.raises(ValueError, match="not allowed"):
+        webhook_targets("https://updates.example/hook")
+    monkeypatch.setattr(
+        "campix.notify._resolve",
+        lambda host, port, timeout: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", port))
+        ],
+    )
+    assert webhook_targets("https://updates.example/hook") == ["8.8.8.8"]
+    with pytest.raises(ValueError, match="not allowed"):
+        validate_webhook_url("http://[::ffff:169.254.169.254]/hook")
 
 
 def test_viewer_cannot_read_notification_settings(client):
